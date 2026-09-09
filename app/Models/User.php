@@ -34,6 +34,7 @@ class User extends Authenticatable
         'label',
         'value',
         'last_seen',
+        'has_push_subscription',
     ];
     protected $casts = [
         'created_at' => 'datetime'
@@ -70,6 +71,7 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'device_token',
     ];
 
     /**
@@ -96,6 +98,16 @@ class User extends Authenticatable
     public function puskesmas()
     {
         return $this->hasOne(Puskesmas::class, 'user_id');
+    }
+
+    public function getHasPushSubscriptionAttribute(): bool
+    {
+        return filled($this->attributes['device_token'] ?? null);
+    }
+
+    public function pushSubscriptions()
+    {
+        return $this->hasMany(UserPushSubscription::class);
     }
 
     public function relatedPasien(): ?Pasien

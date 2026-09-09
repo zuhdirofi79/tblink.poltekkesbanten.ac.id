@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\SendFcmJob;
 use App\Models\HistoryJadwalObatPasien;
 use App\Models\JadwalObat;
 use App\Models\JadwalVisit;
@@ -412,7 +411,7 @@ class PasienController extends Controller
             }
         }
     }
-    public function send_notif(Request $r, Pasien $pasien)
+    public function send_notif(Request $r, Pasien $pasien, \App\Services\FcmPushService $push)
     {
         $r->validate([
             'judul' => 'required',
@@ -423,9 +422,19 @@ class PasienController extends Controller
         if ($puskesmas->id != $pasien->puskesmas_id) {
             abort(403);
         }
-        if ($pasien->user && $pasien->user->device_token != null) {
-            SendFcmJob::dispatch($r->judul, $r->isi, $pasien->user->device_token);
+        $result = $push->sendToUser($pasien->user, $r->judul, $r->isi);
+        if (! $result['success']) {
+            return response()->json([
+                'status' => 'error',
+                'reason' => $result['reason'],
+                'delivery' => $result['delivery'],
+            ], 422);
         }
-        return response()->json('success');
+
+        return response()->json([
+            'status' => 'FCM_ACCEPTED',
+            'delivery' => $result['delivery'],
+            'subscriptions_sent' => $result['subscriptions_sent'] ?? 0,
+        ]);
     }
 }

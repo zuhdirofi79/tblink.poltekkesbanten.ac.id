@@ -138,7 +138,7 @@ function BelumMinumObat() {
                                         </div>
                                     </Button>
                                     <Button onClick={() => {
-                                        if (d.pasien.user.device_token !== null) {
+                                        if (d.pasien.user.has_push_subscription) {
                                             setPasienData(d)
                                             setNotifTitle(`Pengingat Minum Obat ${d.obat.nama_obat}`)
                                             setNotifBody(`Obat ${d.obat.nama_obat} jam ${moment(d.waktu).format('HH:mm')} belum diminum - ${user.name}`)

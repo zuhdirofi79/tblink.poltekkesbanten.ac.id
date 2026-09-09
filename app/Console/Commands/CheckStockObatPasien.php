@@ -6,6 +6,7 @@ use App\Jobs\SendFcmJob;
 use App\Models\ObatPasien;
 use App\Models\User;
 use App\Notifications\StockObatPasien;
+use App\Services\FcmPushService;
 use Illuminate\Console\Command;
 
 class CheckStockObatPasien extends Command
@@ -27,20 +28,19 @@ class CheckStockObatPasien extends Command
     /**
      * Execute the console command.
      */
-    public function handle()
+    public function handle(FcmPushService $push)
     {
         $ops = ObatPasien::where('active', 1)->get();
         foreach ($ops as $op) {
             $sisa_hari = $op->stock / $op->jadwal->details->sum('dosis');
             if ($sisa_hari < 3) {
-                //kirim notif
                 $usrs = User::whereHas('permissions', function ($p) {
                     $p->where('name', 'Admin');
                 })->get();
                 foreach ($usrs as $usr) {
                     $usr->notify(new StockObatPasien($op));
-                    if ($usr->device_token) {
-                        SendFcmJob::dispatch('Stock Obat Pasien', 'Stock obat ' . $op->obat->nama . ' kurang dari 3 hari', $usr->device_token, route('pasien.show', $op->pasien_id));
+                    foreach ($push->tokensForUser($usr) as $token) {
+                        SendFcmJob::dispatch('Stock Obat Pasien', 'Stock obat ' . $op->obat->nama . ' kurang dari 3 hari', $token, route('pasien.show', $op->pasien_id));
                     }
                 }
             }

@@ -54,34 +54,35 @@ class SendNotifMinumObatCmd extends Command
                 : "Obat {$obatNama} jam {$jam} belum diminum.";
             $url = route('dashboard');
 
-            $tokens = [];
+            $targets = [];
             $pasienUser = $pasien->user;
-            if ($pasienUser && filled($pasienUser->device_token)) {
-                $tokens[$pasienUser->id] = $pasienUser->device_token;
+            if ($pasienUser) {
+                $targets[$pasienUser->id] = $pasienUser;
             } else {
-                Log::warning('[PUSH REMINDER] No active web push subscription for user', [
+                Log::warning('[PUSH REMINDER] No pasien user', [
                     'pasien_id' => $pasien->id,
-                    'user_id' => $pasienUser?->id,
                     'jadwal_id' => $sch->id,
                 ]);
             }
 
             $pendamping = $pasien->pendamping;
-            if ($pendamping && filled($pendamping->device_token)) {
-                $tokens[$pendamping->id] = $pendamping->device_token;
+            if ($pendamping) {
+                $targets[$pendamping->id] = $pendamping;
             }
 
-            if ($tokens === []) {
+            if ($targets === []) {
                 $skipped++;
                 continue;
             }
 
             $successCount = 0;
-            foreach ($tokens as $userId => $token) {
-                $result = $push->send($token, $title, $body, $url, $sch->id);
+            $foundAny = false;
+            foreach ($targets as $userId => $targetUser) {
+                $result = $push->sendToUser($targetUser, $title, $body, $url, $sch->id);
+                $foundAny = $foundAny || ($result['subscriptions_found'] ?? 0) > 0;
                 if ($result['success']) {
-                    $successCount++;
-                    $sent++;
+                    $successCount += (int) ($result['subscriptions_sent'] ?? 0);
+                    $sent += (int) ($result['subscriptions_sent'] ?? 0);
                 } else {
                     Log::warning('[PUSH REMINDER] Send failed', [
                         'pasien_id' => $pasien->id,
@@ -89,8 +90,17 @@ class SendNotifMinumObatCmd extends Command
                         'jadwal_id' => $sch->id,
                         'reason' => $result['reason'],
                         'http_status' => $result['status'],
+                        'token_fingerprint' => $result['token_fingerprint'] ?? null,
                     ]);
                 }
+            }
+
+            if (! $foundAny) {
+                Log::warning('[PUSH REMINDER] No active web push subscription for user', [
+                    'pasien_id' => $pasien->id,
+                    'user_id' => $pasienUser?->id,
+                    'jadwal_id' => $sch->id,
+                ]);
             }
 
             Log::info('[PUSH REMINDER]', [

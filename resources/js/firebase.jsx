@@ -24,39 +24,45 @@ function assertFirebaseWebConfig() {
 
     if (missing.length > 0 || !firebaseVapidKey) {
         throw new Error(
-            `[Push] Firebase web config incomplete. Missing: ${[...missing, !firebaseVapidKey ? 'vapidKey' : null].filter(Boolean).join(', ')}`,
+            `[FCM] Firebase web config incomplete. Missing: ${[...missing, !firebaseVapidKey ? 'vapidKey' : null].filter(Boolean).join(', ')}`,
         );
     }
 }
 
+export function parseFcmPayload(payload) {
+    const data = payload?.data || {};
+    const notif = payload?.notification || {};
+    const title = notif.title || data.title || 'Control TB';
+    const body = notif.body || data.body || '';
+    const icon = data.icon || notif.icon || '/menkes192.png';
+    const badge = data.badge || '/menkes192.png';
+    const tag = data.tag || notif.tag || 'controltb-reminder';
+    const url = data.url || data.link || '/dashboard';
+
+    return { title, body, icon, badge, tag, url };
+}
+
+export async function hashToken(token) {
+    if (!token || typeof crypto === 'undefined' || !crypto.subtle) {
+        return '';
+    }
+
+    const bytes = new TextEncoder().encode(token);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+
+    return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+export function fingerprintFromHash(hash) {
+    return (hash || '').slice(0, 12);
+}
+
 let app = null;
 let messaging = null;
-
-try {
-    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-        assertFirebaseWebConfig();
-        app = initializeApp(firebaseWebConfig);
-        messaging = getMessaging(app);
-        onMessage(messaging, (payload) => {
-            const title = payload?.notification?.title || payload?.data?.title || 'Control TB';
-            const body = payload?.notification?.body || payload?.data?.body || '';
-            if (Notification.permission === 'granted' && title) {
-                navigator.serviceWorker.ready.then((registration) => {
-                    registration.showNotification(title, {
-                        body,
-                        icon: payload?.data?.icon || '/menkes192.png',
-                        data: {
-                            url: payload?.data?.url || payload?.data?.link || '/dashboard',
-                        },
-                    });
-                });
-            }
-        });
-    }
-} catch (error) {
-    console.info('[Push] Firebase messaging is unavailable in this browser.', error);
-    messaging = null;
-}
+let initPromise = null;
+let foregroundBound = false;
 
 export async function getPushRegistration() {
     const registration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
@@ -64,8 +70,101 @@ export async function getPushRegistration() {
     return registration;
 }
 
+async function displaySystemNotification(payload) {
+    const parsed = parseFcmPayload(payload);
+    console.info('[FCM] showNotification requested', { title: parsed.title, tag: parsed.tag });
+
+    if (Notification.permission !== 'granted') {
+        throw new Error('Notification permission is not granted');
+    }
+
+    const registration = await navigator.serviceWorker.ready;
+    if (!registration?.showNotification) {
+        throw new Error('ServiceWorkerRegistration.showNotification is unavailable');
+    }
+
+    await registration.showNotification(parsed.title, {
+        body: parsed.body,
+        icon: parsed.icon,
+        badge: parsed.badge,
+        tag: parsed.tag,
+        renotify: true,
+        data: {
+            url: parsed.url,
+        },
+    });
+
+    console.info('[FCM] showNotification success');
+    window.dispatchEvent(
+        new CustomEvent('controltb-fcm-display', {
+            detail: { status: 'DISPLAY_REQUESTED', ...parsed, at: Date.now() },
+        }),
+    );
+
+    return parsed;
+}
+
+async function handleForegroundMessage(payload) {
+    console.info('[FCM] foreground message received');
+    const parsed = parseFcmPayload(payload);
+    window.dispatchEvent(
+        new CustomEvent('controltb-fcm-foreground', {
+            detail: { ...parsed, at: Date.now() },
+        }),
+    );
+
+    try {
+        await displaySystemNotification(payload);
+    } catch (error) {
+        console.error('[FCM] showNotification error', error);
+        window.dispatchEvent(
+            new CustomEvent('controltb-fcm-display', {
+                detail: { status: 'DISPLAY_FAILED', error: error?.message || String(error), at: Date.now() },
+            }),
+        );
+    }
+}
+
+export async function initFirebaseMessaging() {
+    if (initPromise) {
+        return initPromise;
+    }
+
+    initPromise = (async () => {
+        if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+            return null;
+        }
+
+        assertFirebaseWebConfig();
+        await getPushRegistration();
+
+        if (!app) {
+            app = initializeApp(firebaseWebConfig);
+        }
+        if (!messaging) {
+            messaging = getMessaging(app);
+        }
+        if (!foregroundBound) {
+            onMessage(messaging, (payload) => {
+                void handleForegroundMessage(payload);
+            });
+            foregroundBound = true;
+        }
+
+        return messaging;
+    })().catch((error) => {
+        console.info('[FCM] Firebase messaging is unavailable in this browser.', error);
+        messaging = null;
+        initPromise = null;
+        return null;
+    });
+
+    return initPromise;
+}
+
 export const getFBToken = async (vapidPublicKey) => {
-    if (!messaging) {
+    const ready = await initFirebaseMessaging();
+    if (!ready) {
         throw new Error('Push messaging is not supported in this browser');
     }
 
@@ -95,24 +194,57 @@ export const getFBToken = async (vapidPublicKey) => {
         throw new Error('No registration token available. Request permission to generate token');
     }
 
+    const hash = await hashToken(currentToken);
+    console.info('[FCM] current registration fingerprint', fingerprintFromHash(hash));
+
     return currentToken;
 };
 
-export const clearFBToken = async () => {
-    if (!messaging) {
-        return false;
+export async function peekFBToken(vapidPublicKey) {
+    const ready = await initFirebaseMessaging();
+    if (!ready || Notification.permission !== 'granted') {
+        return '';
     }
 
+    const vapidKey = (vapidPublicKey || firebaseVapidKey || '').trim();
+    if (!vapidKey) {
+        return '';
+    }
+
+    const registration = await getPushRegistration();
+    const token = await getToken(messaging, {
+        vapidKey,
+        serviceWorkerRegistration: registration,
+    });
+
+    return token || '';
+}
+
+export const clearFBToken = async () => {
     try {
+        await initFirebaseMessaging();
         const registration = await getPushRegistration();
         const subscription = await registration.pushManager.getSubscription();
         if (subscription) {
             await subscription.unsubscribe();
         }
-        await deleteToken(messaging);
+        if (messaging) {
+            await deleteToken(messaging);
+        }
         return true;
     } catch (error) {
-        console.info('[Push] Unable to clear FCM token', error);
+        console.info('[FCM] Unable to clear FCM token', error);
         return false;
     }
 };
+
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+    void initFirebaseMessaging();
+
+    navigator.serviceWorker.addEventListener('message', (event) => {
+        const data = event.data || {};
+        if (data.type === 'controltb-fcm-background') {
+            window.dispatchEvent(new CustomEvent('controltb-fcm-background', { detail: data }));
+        }
+    });
+}

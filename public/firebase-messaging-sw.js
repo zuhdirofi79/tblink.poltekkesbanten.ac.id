@@ -15,6 +15,7 @@ if (firebaseWebConfig && firebaseWebConfig.projectId && firebaseWebConfig.apiKey
     firebase.initializeApp(firebaseWebConfig);
     const messaging = firebase.messaging();
     messaging.onBackgroundMessage(function (payload) {
+        console.info('[SW] fallback firebase-messaging-sw onBackgroundMessage');
         const data = (payload && payload.data) || {};
         const notif = (payload && payload.notification) || {};
         const title = notif.title || data.title || 'Pengingat Minum Obat';

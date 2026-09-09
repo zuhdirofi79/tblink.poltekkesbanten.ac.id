@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'controltb-sw-v4';
+const CACHE_VERSION = 'controltb-sw-v5';
 
 importScripts('/firebase-sw-config.js');
 importScripts('https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js');
@@ -7,7 +7,7 @@ importScripts('https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-com
 const firebaseWebConfig = self.__FIREBASE_WEB_CONFIG__;
 
 if (!firebaseWebConfig || !firebaseWebConfig.projectId || !firebaseWebConfig.apiKey) {
-    console.error('[Push] firebase-sw-config.js is missing web config');
+    console.error('[SW] firebase-sw-config.js is missing web config');
 } else {
     firebase.initializeApp(firebaseWebConfig);
 }
@@ -28,7 +28,7 @@ function notificationOptionsFromPayload(payload) {
         options: {
             body: body,
             icon: icon,
-            badge: '/menkes192.png',
+            badge: data.badge || '/menkes192.png',
             tag: tag,
             renotify: true,
             data: {
@@ -40,24 +40,46 @@ function notificationOptionsFromPayload(payload) {
 
 const recentNotifications = {};
 
+function notifyClients(parsed) {
+    return self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clientList) {
+        clientList.forEach(function (client) {
+            client.postMessage({
+                type: 'controltb-fcm-background',
+                title: parsed.title,
+                tag: parsed.options.tag,
+                at: Date.now(),
+            });
+        });
+    });
+}
+
 function showPushNotification(payload) {
+    console.info('[SW] notification payload parsed');
     const parsed = notificationOptionsFromPayload(payload || {});
     const key = parsed.title + '|' + parsed.options.body + '|' + parsed.options.tag;
     const now = Date.now();
-    if (recentNotifications[key] && now - recentNotifications[key] < 2000) {
+    if (recentNotifications[key] && now - recentNotifications[key] < 2500) {
+        console.info('[SW] showNotification skipped (duplicate)', parsed.options.tag);
         return Promise.resolve();
     }
     recentNotifications[key] = now;
-    return self.registration.showNotification(parsed.title, parsed.options);
+    console.info('[SW] showNotification invoked', parsed.options.tag);
+    return self.registration
+        .showNotification(parsed.title, parsed.options)
+        .then(function () {
+            return notifyClients(parsed);
+        });
 }
 
 if (messaging) {
     messaging.onBackgroundMessage(function (payload) {
+        console.info('[SW] onBackgroundMessage');
         return showPushNotification(payload);
     });
 }
 
 self.addEventListener('push', function (event) {
+    console.info('[SW] push received');
     event.waitUntil(
         (async function () {
             let payload = {};
@@ -65,22 +87,17 @@ self.addEventListener('push', function (event) {
                 payload = event.data ? event.data.json() : {};
             } catch (err) {
                 payload = {
-                    notification: {
+                    data: {
                         title: 'Pengingat Minum Obat',
                         body: event.data ? event.data.text() : 'Saatnya minum obat Anda.',
                     },
                 };
             }
-            if (payload.notification || payload.data) {
-                return showPushNotification(payload);
-            }
-            return showPushNotification({
-                notification: {
-                    title: payload.title || 'Pengingat Minum Obat',
-                    body: payload.body || 'Saatnya minum obat Anda.',
-                },
-                data: payload,
-            });
+
+            // Data-only FCM: always display via showNotification.
+            // If a notification payload is present, Chrome may already display it.
+            // Dedup by tag/title/body within 2.5s prevents a second banner.
+            return showPushNotification(payload);
         })(),
     );
 });
