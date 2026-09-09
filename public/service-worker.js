@@ -1,18 +1,18 @@
-const CACHE_VERSION = 'controltb-sw-v3';
+const CACHE_VERSION = 'controltb-sw-v4';
 
+importScripts('/firebase-sw-config.js');
 importScripts('https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js');
 
-firebase.initializeApp({
-    apiKey: 'AIzaSyCaDffhRWeG-Sq-N93koMHF8Fvp8ZvfPIc',
-    authDomain: 'control-tb.firebaseapp.com',
-    projectId: 'control-tb',
-    storageBucket: 'control-tb.firebasestorage.app',
-    messagingSenderId: '434051782845',
-    appId: '1:434051782845:web:7084ea167df786c242bfd4',
-});
+const firebaseWebConfig = self.__FIREBASE_WEB_CONFIG__;
 
-const messaging = firebase.messaging();
+if (!firebaseWebConfig || !firebaseWebConfig.projectId || !firebaseWebConfig.apiKey) {
+    console.error('[Push] firebase-sw-config.js is missing web config');
+} else {
+    firebase.initializeApp(firebaseWebConfig);
+}
+
+const messaging = firebaseWebConfig && firebaseWebConfig.projectId ? firebase.messaging() : null;
 
 function notificationOptionsFromPayload(payload) {
     const data = (payload && payload.data) || {};
@@ -51,9 +51,11 @@ function showPushNotification(payload) {
     return self.registration.showNotification(parsed.title, parsed.options);
 }
 
-messaging.onBackgroundMessage(function (payload) {
-    return showPushNotification(payload);
-});
+if (messaging) {
+    messaging.onBackgroundMessage(function (payload) {
+        return showPushNotification(payload);
+    });
+}
 
 self.addEventListener('push', function (event) {
     event.waitUntil(
@@ -69,7 +71,6 @@ self.addEventListener('push', function (event) {
                     },
                 };
             }
-            // FCM wraps some messages as { notification, data } or { data }.
             if (payload.notification || payload.data) {
                 return showPushNotification(payload);
             }
@@ -93,9 +94,7 @@ self.addEventListener('notificationclick', function (event) {
                 const client = clientList[i];
                 if (client.url && 'focus' in client) {
                     try {
-                        const clientPath = new URL(client.url).pathname;
-                        const targetPath = new URL(targetUrl, self.location.origin).pathname;
-                        if (clientPath === targetPath || client.url.indexOf(self.location.origin) === 0) {
+                        if (client.url.indexOf(self.location.origin) === 0) {
                             return client.focus();
                         }
                     } catch (err) {

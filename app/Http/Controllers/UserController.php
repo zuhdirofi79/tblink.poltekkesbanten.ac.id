@@ -147,6 +147,8 @@ class UserController extends Controller
                 'subscriptions_sent' => 0,
                 'subscriptions_failed' => 0,
                 'reason' => $reason,
+                'fcm_project_id' => $push->projectId(),
+                'credential_project_id' => $push->credentialProjectId(),
             ];
         } else {
             $send = $push->send(
@@ -164,6 +166,8 @@ class UserController extends Controller
                 'subscriptions_sent' => $sent,
                 'subscriptions_failed' => $failed,
                 'reason' => $reason,
+                'fcm_project_id' => $push->projectId(),
+                'credential_project_id' => $push->credentialProjectId(),
             ];
             Log::info('[PUSH TEST]', [
                 'user_id' => $user->id,
@@ -172,6 +176,8 @@ class UserController extends Controller
                 'failed_count' => $failed,
                 'reason' => $reason,
                 'http_status' => $send['status'],
+                'fcm_project_id' => $push->projectId(),
+                'credential_project_id' => $push->credentialProjectId(),
             ]);
         }
 

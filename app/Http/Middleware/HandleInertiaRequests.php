@@ -57,6 +57,8 @@ class HandleInertiaRequests extends Middleware
             ],
             'push' => [
                 'vapidPublicKey' => config('fcm.vapid_public_key'),
+                'firebaseProjectId' => config('fcm.project_id'),
+                'messagingSenderId' => config('fcm.web.messagingSenderId'),
                 'serverRegistered' => (bool) ($u?->device_token),
             ],
         ];

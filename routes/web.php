@@ -17,6 +17,9 @@ Route::get('/', function () {
     return redirect('dashboard');
 })->name('home');
 
+Route::get('/firebase-sw-config.js', \App\Http\Controllers\FirebaseSwConfigController::class)
+    ->name('firebase.sw-config');
+
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('dashboard', function () {
         return Inertia::render('dashboard');

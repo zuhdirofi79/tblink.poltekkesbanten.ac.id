@@ -140,14 +140,26 @@ class FcmPushService
     public function projectId(): string
     {
         $fromConfig = trim((string) config('fcm.project_id'));
-        $credentials = $this->credentialPayload();
-        $fromFile = trim((string) ($credentials['project_id'] ?? ''));
+        $fromFile = $this->credentialProjectId();
+        $stale = ['', 'c-tb', 'control-tb'];
 
-        if ($fromFile !== '' && ($fromConfig === '' || $fromConfig === 'c-tb')) {
-            return $fromFile;
+        if (! in_array($fromConfig, $stale, true)) {
+            if ($fromFile !== '' && $fromFile !== $fromConfig) {
+                Log::warning('[PUSH] FCM_PROJECT_ID differs from service account project_id', [
+                    'fcm_project_id' => $fromConfig,
+                    'credential_project_id' => $fromFile,
+                ]);
+            }
+
+            return $fromConfig;
         }
 
-        return $fromConfig !== '' ? $fromConfig : $fromFile;
+        return $fromFile !== '' ? $fromFile : 'controltb-3262b';
+    }
+
+    public function credentialProjectId(): string
+    {
+        return trim((string) ($this->credentialPayload()['project_id'] ?? ''));
     }
 
     public function credentialsPath(): string
@@ -176,7 +188,8 @@ class FcmPushService
 
     private function accessToken(): string
     {
-        $cached = Cache::get('fcm_access_token');
+        $cacheKey = 'fcm_access_token_'.$this->projectId();
+        $cached = Cache::get($cacheKey);
         if (is_string($cached) && $cached !== '') {
             return $cached;
         }
@@ -198,7 +211,7 @@ class FcmPushService
         }
 
         $expires = (int) ($token['expires_in'] ?? 3600);
-        Cache::put('fcm_access_token', $accessToken, now()->addSeconds(max(60, $expires - 100)));
+        Cache::put($cacheKey, $accessToken, now()->addSeconds(max(60, $expires - 100)));
 
         return $accessToken;
     }
