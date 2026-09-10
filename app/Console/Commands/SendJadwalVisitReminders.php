@@ -4,10 +4,10 @@ namespace App\Console\Commands;
 
 use App\Models\JadwalVisit;
 use App\Services\FcmPushService;
+use App\Services\PushDiagnosticLogger;
 use App\Services\VisitReminderTracker;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SendJadwalVisitReminders extends Command
@@ -16,7 +16,7 @@ class SendJadwalVisitReminders extends Command
 
     protected $description = 'Kirim Web Push pengingat jadwal berobat (JadwalVisit)';
 
-    public function handle(FcmPushService $push, VisitReminderTracker $tracker): int
+    public function handle(FcmPushService $push, VisitReminderTracker $tracker, PushDiagnosticLogger $diag): int
     {
         $now = now();
         $timezone = (string) config('app.timezone');
@@ -29,11 +29,24 @@ class SendJadwalVisitReminders extends Command
             ->where('tgl_visit', '>=', $windowStart)
             ->get();
 
-        Log::info('[VISIT_REMINDER_SCAN]', [
+        $diag->info('VISIT_REMINDER_SCAN', [
             'now' => $now->toDateTimeString(),
-            'timezone' => $timezone,
-            'candidates' => $candidates->count(),
+            'window_start' => $windowStart->toDateTimeString(),
+            'candidate_count' => $candidates->count(),
+            'notification_type' => 'visit_reminder',
         ]);
+
+        if ($candidates->isEmpty()) {
+            $diag->info('VISIT_REMINDER_NONE_DUE', [
+                'now' => $now->toDateTimeString(),
+                'candidate_count' => 0,
+                'notification_type' => 'visit_reminder',
+                'result' => 'NONE_DUE',
+            ]);
+            $this->info('Visit reminders due 0, sent 0, skipped 0');
+
+            return self::SUCCESS;
+        }
 
         $sent = 0;
         $skipped = 0;
@@ -51,41 +64,48 @@ class SendJadwalVisitReminders extends Command
                 $pasien = $visit->pasien;
                 $patientUser = $pasien?->user;
                 if (! $patientUser) {
-                    Log::warning('[VISIT_REMINDER_DUE]', [
-                        'trace_id' => $traceId,
+                    $diag->warning('TARGET_RESOLVE', [
+                        'push_trace_id' => $traceId,
                         'visit_id' => $visit->id,
-                        'patient_user_id' => null,
-                        'reason' => 'patient_user_missing',
+                        'notification_type' => 'visit_reminder',
+                        'result' => 'patient_user_missing',
                     ]);
                     $skipped++;
                     continue;
                 }
 
                 $due++;
+                $diag->info('VISIT_REMINDER_DUE', [
+                    'push_trace_id' => $traceId,
+                    'visit_id' => $visit->id,
+                    'scheduled_at' => optional($visit->tgl_visit)->toDateTimeString(),
+                    'notification_type' => 'visit_reminder',
+                ]);
+
                 $jam = Carbon::parse($visit->tgl_visit)->timezone($timezone)->format('H:i');
                 $title = 'Pengingat Jadwal Berobat';
                 $body = 'Anda memiliki jadwal berobat pukul '.$jam.'.';
                 $url = route('pasien.visit-pasien.index');
 
-                $targets = [$patientUser->id => $patientUser];
+                $targets = [$patientUser->id => ['user' => $patientUser, 'role' => 'patient']];
                 $pendamping = $pasien?->pendamping;
                 if ($pendamping) {
-                    $targets[$pendamping->id] = $pendamping;
+                    $targets[$pendamping->id] = ['user' => $pendamping, 'role' => 'companion'];
                 }
 
                 $successCount = 0;
                 $subscriptionCount = 0;
 
-                foreach ($targets as $userId => $targetUser) {
+                foreach ($targets as $userId => $target) {
+                    $targetUser = $target['user'];
                     $count = count($push->tokensForUser($targetUser));
                     $subscriptionCount += $count;
-
-                    Log::info('[VISIT_REMINDER_DUE]', [
-                        'trace_id' => $traceId,
+                    $diag->info('TARGET_RESOLVE', [
+                        'push_trace_id' => $traceId,
                         'visit_id' => $visit->id,
-                        'patient_user_id' => $patientUser->id,
-                        'user_id' => $userId,
-                        'scheduled_at' => optional($visit->tgl_visit)->toDateTimeString(),
+                        'target_user_id' => $userId,
+                        'role' => $target['role'],
+                        'notification_type' => 'visit_reminder',
                         'subscription_count' => $count,
                     ]);
 
@@ -106,15 +126,6 @@ class SendJadwalVisitReminders extends Command
                     if ($result['success']) {
                         $successCount += (int) ($result['subscriptions_sent'] ?? 0);
                         $sent += (int) ($result['subscriptions_sent'] ?? 0);
-                    } else {
-                        Log::warning('[VISIT_REMINDER]', [
-                            'trace_id' => $traceId,
-                            'visit_id' => $visit->id,
-                            'patient_user_id' => $patientUser->id,
-                            'reason' => $result['reason'],
-                            'http_status' => $result['status'] ?? null,
-                            'token_fingerprint' => $result['token_fingerprint'] ?? null,
-                        ]);
                     }
                 }
 
@@ -122,21 +133,20 @@ class SendJadwalVisitReminders extends Command
                     $tracker->markSent($visit);
                 }
 
-                Log::info('[VISIT_REMINDER]', [
-                    'trace_id' => $traceId,
+                $diag->info('VISIT_REMINDER_RESULT', [
+                    'push_trace_id' => $traceId,
                     'visit_id' => $visit->id,
-                    'patient_user_id' => $patientUser->id,
-                    'scheduled_at' => optional($visit->tgl_visit)->toDateTimeString(),
+                    'target_user_id' => $patientUser->id,
                     'subscription_count' => $subscriptionCount,
-                    'sent_count' => $successCount,
+                    'result' => $successCount > 0 ? 'FCM_ACCEPTED' : 'none_sent',
+                    'notification_type' => 'visit_reminder',
                 ]);
             } catch (\Throwable $e) {
                 $skipped++;
-                Log::error('[VISIT_REMINDER] exception', [
-                    'trace_id' => $traceId,
+                $diag->exception('VISIT_REMINDER_EXCEPTION', $e, [
+                    'push_trace_id' => $traceId,
                     'visit_id' => $visit->id,
-                    'exception' => $e::class,
-                    'message' => $e->getMessage(),
+                    'notification_type' => 'visit_reminder',
                 ]);
             }
         }

@@ -4,9 +4,9 @@ namespace App\Console\Commands;
 
 use App\Models\HistoryJadwalObatPasien;
 use App\Services\FcmPushService;
+use App\Services\PushDiagnosticLogger;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SendNotifMinumObatCmd extends Command
@@ -15,23 +15,38 @@ class SendNotifMinumObatCmd extends Command
 
     protected $description = 'Kirim Web Push pengingat minum obat sesuai jadwal';
 
-    public function handle(FcmPushService $push): int
+    public function handle(FcmPushService $push, PushDiagnosticLogger $diag): int
     {
         $now = now();
         $timezone = (string) config('app.timezone');
+        $windowStart = $now->copy()->subMinutes(30);
 
         $candidates = HistoryJadwalObatPasien::query()
             ->with(['pasien.user', 'pasien.pendamping', 'pasien.puskesmas', 'obat'])
             ->where('sudah_minum', false)
             ->where('waktu', '<=', $now)
-            ->where('waktu', '>=', $now->copy()->subMinutes(30))
+            ->where('waktu', '>=', $windowStart)
             ->get();
 
-        Log::info('[REMINDER_SCAN]', [
+        $diag->info('MED_REMINDER_SCAN', [
             'now' => $now->toDateTimeString(),
-            'timezone' => $timezone,
-            'candidates' => $candidates->count(),
+            'window_start' => $windowStart->toDateTimeString(),
+            'candidate_count' => $candidates->count(),
+            'notification_type' => 'medication_reminder',
         ]);
+
+        if ($candidates->isEmpty()) {
+            $diag->info('MED_REMINDER_NONE_DUE', [
+                'now' => $now->toDateTimeString(),
+                'window_start' => $windowStart->toDateTimeString(),
+                'candidate_count' => 0,
+                'notification_type' => 'medication_reminder',
+                'result' => 'NONE_DUE',
+            ]);
+            $this->info('Processed 0, sent 0, skipped 0');
+
+            return self::SUCCESS;
+        }
 
         $processed = 0;
         $sent = 0;
@@ -43,12 +58,20 @@ class SendNotifMinumObatCmd extends Command
             $traceId = (string) Str::uuid();
 
             try {
+                $diag->info('MED_REMINDER_DUE', [
+                    'push_trace_id' => $traceId,
+                    'history_id' => $sch->id,
+                    'scheduled_at' => optional($sch->waktu)->toDateTimeString(),
+                    'notification_type' => 'medication_reminder',
+                ]);
+
                 $pasien = $sch->pasien;
                 if (! $pasien) {
-                    Log::warning('[REMINDER_ITEM]', [
-                        'trace_id' => $traceId,
+                    $diag->warning('TARGET_RESOLVE', [
+                        'push_trace_id' => $traceId,
                         'history_id' => $sch->id,
-                        'status' => 'pasien_missing',
+                        'result' => 'pasien_missing',
+                        'error_code' => 'pasien_missing',
                     ]);
                     $skipped++;
                     continue;
@@ -63,14 +86,20 @@ class SendNotifMinumObatCmd extends Command
                 $targets = [];
                 $pasienUser = $pasien->user;
                 if ($pasienUser) {
-                    $targets[$pasienUser->id] = $pasienUser;
+                    $targets[$pasienUser->id] = ['user' => $pasienUser, 'role' => 'patient'];
                 }
                 $pendamping = $pasien->pendamping;
                 if ($pendamping) {
-                    $targets[$pendamping->id] = $pendamping;
+                    $targets[$pendamping->id] = ['user' => $pendamping, 'role' => 'companion'];
                 }
 
                 if ($targets === []) {
+                    $diag->warning('NO_SUBSCRIPTION', [
+                        'push_trace_id' => $traceId,
+                        'history_id' => $sch->id,
+                        'subscription_count' => 0,
+                        'result' => 'no_target_user',
+                    ]);
                     $skipped++;
                     continue;
                 }
@@ -79,15 +108,15 @@ class SendNotifMinumObatCmd extends Command
                 $foundAny = false;
                 $attempted = 0;
 
-                foreach ($targets as $userId => $targetUser) {
+                foreach ($targets as $userId => $target) {
+                    $targetUser = $target['user'];
                     if ($sch->hasBeenNotified((int) $userId)) {
-                        Log::info('[REMINDER_ITEM]', [
-                            'trace_id' => $traceId,
+                        $diag->info('TARGET_RESOLVE', [
+                            'push_trace_id' => $traceId,
                             'history_id' => $sch->id,
-                            'user_id' => $userId,
-                            'scheduled_at' => optional($sch->waktu)->toDateTimeString(),
-                            'status' => 'already_notified',
-                            'already_notified' => true,
+                            'target_user_id' => $userId,
+                            'role' => $target['role'],
+                            'result' => 'already_notified',
                         ]);
                         $skipped++;
                         continue;
@@ -95,15 +124,13 @@ class SendNotifMinumObatCmd extends Command
 
                     $attempted++;
                     $eligible++;
-                    $subCount = count($push->tokensForUser($targetUser));
-                    Log::info('[MED_SCHEDULE_DUE]', [
-                        'trace_id' => $traceId,
+                    $diag->info('TARGET_RESOLVE', [
+                        'push_trace_id' => $traceId,
                         'history_id' => $sch->id,
-                        'user_id' => $userId,
+                        'target_user_id' => $userId,
+                        'role' => $target['role'],
                         'scheduled_at' => optional($sch->waktu)->toDateTimeString(),
-                        'status' => 'eligible',
-                        'already_notified' => false,
-                        'push_subscription_count' => $subCount,
+                        'notification_type' => 'medication_reminder',
                     ]);
 
                     $result = $push->sendToUser(
@@ -119,52 +146,32 @@ class SendNotifMinumObatCmd extends Command
                     if ($result['success']) {
                         $successCount += (int) ($result['subscriptions_sent'] ?? 0);
                         $sent += (int) ($result['subscriptions_sent'] ?? 0);
-                    } else {
-                        Log::warning('[REMINDER] Send failed', [
-                            'trace_id' => $traceId,
-                            'history_id' => $sch->id,
-                            'user_id' => $userId,
-                            'reason' => $result['reason'],
-                            'http_status' => $result['status'],
-                            'token_fingerprint' => $result['token_fingerprint'] ?? null,
-                        ]);
                     }
                 }
 
                 if ($attempted > 0 && ! $foundAny) {
-                    Log::warning('[REMINDER] No active web push subscription', [
-                        'trace_id' => $traceId,
+                    $diag->warning('NO_SUBSCRIPTION', [
+                        'push_trace_id' => $traceId,
                         'history_id' => $sch->id,
-                        'pasien_id' => $pasien->id,
-                        'user_id' => $pasienUser?->id,
+                        'target_user_id' => $pasienUser?->id,
+                        'subscription_count' => 0,
+                        'result' => 'NO_SUBSCRIPTION',
                     ]);
                 }
 
-                Log::info('[REMINDER]', [
-                    'trace_id' => $traceId,
+                $diag->info('MED_REMINDER_RESULT', [
+                    'push_trace_id' => $traceId,
                     'history_id' => $sch->id,
-                    'sent_count' => $successCount,
+                    'result' => $successCount > 0 ? 'FCM_ACCEPTED' : 'none_sent',
                 ]);
             } catch (\Throwable $e) {
                 $skipped++;
-                Log::error('[REMINDER_ITEM] exception', [
-                    'trace_id' => $traceId,
+                $diag->exception('MED_REMINDER_EXCEPTION', $e, [
+                    'push_trace_id' => $traceId,
                     'history_id' => $sch->id,
-                    'exception' => $e::class,
-                    'message' => $e->getMessage(),
                 ]);
             }
         }
-
-        Log::info('[REMINDER_SCAN]', [
-            'now' => $now->toDateTimeString(),
-            'timezone' => $timezone,
-            'candidates' => $candidates->count(),
-            'eligible' => $eligible,
-            'processed' => $processed,
-            'sent' => $sent,
-            'skipped' => $skipped,
-        ]);
 
         $this->info("Processed {$processed}, sent {$sent}, skipped {$skipped}");
 

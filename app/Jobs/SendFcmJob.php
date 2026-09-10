@@ -3,9 +3,9 @@
 namespace App\Jobs;
 
 use App\Services\FcmPushService;
+use App\Services\PushDiagnosticLogger;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SendFcmJob implements ShouldQueue
@@ -39,11 +39,11 @@ class SendFcmJob implements ShouldQueue
         $this->traceId = $traceId !== '' ? (string) $traceId : (string) Str::uuid();
     }
 
-    public function handle(FcmPushService $push): void
+    public function handle(FcmPushService $push, PushDiagnosticLogger $diag): void
     {
         $fingerprint = $push->fingerprint($this->token);
-        Log::info('[FCM_JOB_START]', [
-            'trace_id' => $this->traceId,
+        $diag->info('FCM_JOB_START', [
+            'push_trace_id' => $this->traceId,
             'history_id' => $this->historyjadwalobatId,
             'token_fingerprint' => $fingerprint,
         ]);
@@ -58,20 +58,21 @@ class SendFcmJob implements ShouldQueue
         );
 
         if ($result['success']) {
-            Log::info('[FCM_JOB_SUCCESS]', [
-                'trace_id' => $this->traceId,
-                'http_status' => $result['status'],
-                'message_id' => $result['message_id'],
+            $diag->info('FCM_JOB_RESULT', [
+                'push_trace_id' => $this->traceId,
+                'fcm_http_status' => $result['status'],
+                'fcm_message_id' => $result['message_id'],
                 'token_fingerprint' => $fingerprint,
+                'result' => 'FCM_ACCEPTED',
             ]);
 
             return;
         }
 
-        Log::warning('[FCM_JOB_FAILED]', [
-            'trace_id' => $this->traceId,
-            'reason' => $result['reason'],
-            'http_status' => $result['status'],
+        $diag->warning('FCM_JOB_RESULT', [
+            'push_trace_id' => $this->traceId,
+            'result' => $result['reason'],
+            'fcm_http_status' => $result['status'],
             'token_fingerprint' => $fingerprint,
         ]);
 

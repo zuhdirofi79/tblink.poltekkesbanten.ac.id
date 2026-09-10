@@ -33,12 +33,13 @@ class PushSubscriptionStore
         if ($this->tableExists()) {
             return UserPushSubscription::query()
                 ->where('user_id', $user->id)
-                ->get(['token', 'token_hash', 'device_label', 'platform'])
+                ->get(['token', 'token_hash', 'device_label', 'platform', 'last_seen_at'])
                 ->map(fn (UserPushSubscription $row) => [
                     'token' => (string) $row->token,
                     'token_hash' => (string) $row->token_hash,
                     'device_label' => $row->device_label,
                     'platform' => $row->platform,
+                    'last_seen_at' => optional($row->last_seen_at)?->toIso8601String(),
                 ])
                 ->all();
         }
@@ -212,6 +213,120 @@ class PushSubscriptionStore
         }
 
         return array_values(array_unique($hashes));
+    }
+
+    /**
+     * Safe metadata for logs. Never includes the token.
+     *
+     * @return list<array{token_fingerprint: string, platform: ?string, device_label: ?string, last_seen_at: ?string, source: string}>
+     */
+    public function diagnosticRows(User $user): array
+    {
+        $rows = [];
+        $seen = [];
+        $source = $this->tableExists() ? 'user_push_subscriptions' : 'subscription_file';
+
+        foreach ($this->subscriptionsFor($user) as $row) {
+            $token = trim((string) ($row['token'] ?? ''));
+            if ($token === '') {
+                continue;
+            }
+            $hash = (string) ($row['token_hash'] ?? hash('sha256', $token));
+            $seen[$hash] = true;
+            $lastSeen = $row['last_seen_at'] ?? null;
+            $rows[] = [
+                'token_fingerprint' => substr($hash, 0, 12),
+                'platform' => $row['platform'] ?? null,
+                'device_label' => $row['device_label'] ?? null,
+                'last_seen_at' => is_string($lastSeen) ? $lastSeen : null,
+                'source' => $source,
+            ];
+        }
+
+        $legacy = trim((string) $user->device_token);
+        if ($legacy !== '') {
+            $hash = hash('sha256', $legacy);
+            if (! isset($seen[$hash])) {
+                $rows[] = [
+                    'token_fingerprint' => substr($hash, 0, 12),
+                    'platform' => null,
+                    'device_label' => 'legacy',
+                    'last_seen_at' => null,
+                    'source' => 'legacy_device_token',
+                ];
+            }
+        }
+
+        return $rows;
+    }
+
+    public function sourceForToken(User $user, string $token): string
+    {
+        $token = trim($token);
+        $hash = $token !== '' ? hash('sha256', $token) : '';
+        foreach ($this->subscriptionsFor($user) as $row) {
+            $rowToken = trim((string) ($row['token'] ?? ''));
+            $rowHash = (string) ($row['token_hash'] ?? '');
+            if ($rowToken === $token || ($hash !== '' && $rowHash === $hash)) {
+                return $this->tableExists() ? 'user_push_subscriptions' : 'subscription_file';
+            }
+        }
+
+        if (trim((string) $user->device_token) === $token) {
+            return 'legacy_device_token';
+        }
+
+        return 'unknown';
+    }
+
+    public function metadataForToken(User $user, string $token): array
+    {
+        $token = trim($token);
+        $hash = $token !== '' ? hash('sha256', $token) : '';
+        foreach ($this->subscriptionsFor($user) as $row) {
+            $rowToken = trim((string) ($row['token'] ?? ''));
+            $rowHash = (string) ($row['token_hash'] ?? '');
+            if ($rowToken === $token || ($hash !== '' && $rowHash === $hash)) {
+                $lastSeen = $row['last_seen_at'] ?? null;
+
+                return [
+                    'platform' => $row['platform'] ?? null,
+                    'device_label' => $row['device_label'] ?? null,
+                    'last_seen_at' => is_string($lastSeen) ? $lastSeen : null,
+                    'source' => $this->tableExists() ? 'user_push_subscriptions' : 'subscription_file',
+                ];
+            }
+        }
+
+        if (trim((string) $user->device_token) === $token) {
+            return [
+                'platform' => null,
+                'device_label' => 'legacy',
+                'last_seen_at' => null,
+                'source' => 'legacy_device_token',
+            ];
+        }
+
+        return [
+            'platform' => null,
+            'device_label' => null,
+            'last_seen_at' => null,
+            'source' => 'unknown',
+        ];
+    }
+
+    public function aggregatedCount(): int
+    {
+        if ($this->tableExists()) {
+            return UserPushSubscription::query()->count();
+        }
+
+        $count = 0;
+        foreach ($this->fileSubscriptions() as $rows) {
+            $count += count($rows);
+        }
+
+        return $count;
     }
 
     /**

@@ -18,6 +18,9 @@ Route::get('/', function () {
 })->name('home');
 
 Route::get('/push/ack', \App\Http\Controllers\PushAckController::class)->name('push.ack');
+Route::post('/push/client-diagnostic', \App\Http\Controllers\PushClientDiagnosticController::class)
+    ->middleware('auth')
+    ->name('push.client-diagnostic');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('dashboard', function () {
@@ -35,7 +38,7 @@ Route::prefix('jadwal-visit')->controller(JadwalVisitController::class)->middlew
 });
 Route::get('notifikasi-admin', [UserController::class, 'notifikasi_admin'])->middleware(['auth', 'can:Admin'])->name('notifikasi-admin');
 Route::prefix('pasien')->name('pasien.')->group(function () {
-    Route::prefix('visit-pasien')->controller(PasienController::class)->name('visit-pasien.')->group(function () {
+    Route::prefix('visit-pasien')->controller(PasienController::class)->middleware('auth')->name('visit-pasien.')->group(function () {
         Route::get('/', 'visit_pasien')->name('index');
     });
     Route::get('/data-pasien', [PasienController::class, 'data_pasien'])->name('data-pasien');

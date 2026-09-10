@@ -366,11 +366,14 @@ class PasienController extends Controller
     }
     public function visit_pasien(Request $r)
     {
-        $user = auth()->user();
+        $user = $r->user();
+        if (! $user) {
+            return redirect()->route('login');
+        }
         $pasien = null;
-        if ($user->hasPermissionTo('Pasien') || $user->hasPermissionTo('Pendamping')) {
+        if ($user->can('Pasien') || $user->can('Pendamping')) {
             $pasien = $user->relatedPasien();
-        } else if ($user->hasPermissionTo('Admin')) {
+        } elseif ($user->can('Admin')) {
             $r->validate([
                 'pasien_id' => 'required',
             ]);

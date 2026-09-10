@@ -65,6 +65,18 @@ return [
             'replace_placeholders' => true,
         ],
 
+        /*
+         | Push diagnostics always append to storage/logs/laravel.log.
+         | Independent of LOG_CHANNEL=daily so dated files stay intact
+         | while push traces remain greppable in laravel.log.
+         */
+        'push' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/laravel.log'),
+            'level' => env('PUSH_LOG_LEVEL', 'info'),
+            'replace_placeholders' => true,
+        ],
+
         'daily' => [
             'driver' => 'daily',
             'path' => storage_path('logs/laravel.log'),

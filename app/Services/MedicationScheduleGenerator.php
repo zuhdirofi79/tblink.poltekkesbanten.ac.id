@@ -5,11 +5,14 @@ namespace App\Services;
 use App\Models\HistoryJadwalObatPasien;
 use App\Models\JadwalObat;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Log;
 use Throwable;
 
 class MedicationScheduleGenerator
 {
+    public function __construct(private PushDiagnosticLogger $diag)
+    {
+    }
+
     /**
      * Create today's HistoryJadwalObatPasien rows from eligible JadwalObat details.
      *
@@ -54,7 +57,11 @@ class MedicationScheduleGenerator
             'errors' => 0,
         ];
 
-        Log::info('[MED_SCHEDULE_SCAN]', $stats);
+        $this->diag->info('MED_GENERATOR_START', [
+            'date' => $today,
+            'timezone' => $timezone,
+            'notification_type' => 'medication_reminder',
+        ]);
 
         foreach ($schedules as $jadwal) {
             try {
@@ -62,17 +69,24 @@ class MedicationScheduleGenerator
             } catch (Throwable $e) {
                 $stats['errors']++;
                 $stats['skipped']++;
-                Log::warning('[MED_SCHEDULE_SKIP]', [
+                $this->diag->exception('MED_GENERATOR_SKIP', $e, [
                     'jadwal_id' => $jadwal->id,
-                    'detail_id' => null,
-                    'reason' => 'exception',
-                    'exception' => $e::class,
-                    'message' => $e->getMessage(),
+                    'error_code' => 'exception',
                 ]);
             }
         }
 
-        Log::info('[MED_SCHEDULE_SCAN]', $stats);
+        $this->diag->info('MED_GENERATOR_RESULT', [
+            'date' => $today,
+            'timezone' => $timezone,
+            'eligible' => $stats['master_eligible'],
+            'details' => $stats['details_total'],
+            'existing' => $stats['history_existing'],
+            'created' => $stats['history_created'],
+            'skipped' => $stats['skipped'],
+            'errors' => $stats['errors'],
+            'notification_type' => 'medication_reminder',
+        ]);
 
         return $stats;
     }
@@ -84,10 +98,10 @@ class MedicationScheduleGenerator
     {
         if ($jadwal->op && ! $jadwal->op->active) {
             $stats['skipped']++;
-            Log::info('[MED_SCHEDULE_SKIP]', [
+            $this->diag->info('MED_GENERATOR_SKIP', [
                 'jadwal_id' => $jadwal->id,
                 'detail_id' => null,
-                'reason' => 'inactive',
+                'result' => 'inactive',
             ]);
 
             return;
@@ -95,10 +109,10 @@ class MedicationScheduleGenerator
 
         if (! $jadwal->pasien_id || ! $jadwal->obat_id) {
             $stats['skipped']++;
-            Log::info('[MED_SCHEDULE_SKIP]', [
+            $this->diag->info('MED_GENERATOR_SKIP', [
                 'jadwal_id' => $jadwal->id,
                 'detail_id' => null,
-                'reason' => $jadwal->pasien_id ? 'missing_obat' : 'missing_patient',
+                'result' => $jadwal->pasien_id ? 'missing_obat' : 'missing_patient',
             ]);
 
             return;
@@ -107,10 +121,10 @@ class MedicationScheduleGenerator
         $details = $jadwal->details;
         if ($details->isEmpty()) {
             $stats['skipped']++;
-            Log::info('[MED_SCHEDULE_SKIP]', [
+            $this->diag->info('MED_GENERATOR_SKIP', [
                 'jadwal_id' => $jadwal->id,
                 'detail_id' => null,
-                'reason' => 'no_details',
+                'result' => 'no_details',
             ]);
 
             return;
@@ -121,10 +135,10 @@ class MedicationScheduleGenerator
             $scheduledAt = $this->scheduledAt($today, $detail->waktu, $timezone);
             if (! $scheduledAt) {
                 $stats['skipped']++;
-                Log::info('[MED_SCHEDULE_SKIP]', [
+                $this->diag->info('MED_GENERATOR_SKIP', [
                     'jadwal_id' => $jadwal->id,
                     'detail_id' => $detail->id,
-                    'reason' => 'invalid_time',
+                    'result' => 'invalid_time',
                 ]);
 
                 continue;
@@ -138,10 +152,10 @@ class MedicationScheduleGenerator
 
             if ($existing) {
                 $stats['history_existing']++;
-                Log::info('[MED_SCHEDULE_SKIP]', [
+                $this->diag->info('MED_GENERATOR_SKIP', [
                     'jadwal_id' => $jadwal->id,
                     'detail_id' => $detail->id,
-                    'reason' => 'already_exists',
+                    'result' => 'already_exists',
                 ]);
 
                 continue;

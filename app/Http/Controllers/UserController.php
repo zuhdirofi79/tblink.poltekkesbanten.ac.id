@@ -6,7 +6,6 @@ use App\Models\Pasien;
 use App\Models\User;
 use App\Services\FcmPushService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
 use Spatie\Permission\Models\Permission;
 use Illuminate\Notifications\DatabaseNotification as Notification;
 
@@ -106,7 +105,7 @@ class UserController extends Controller
         $user = auth()->user();
         return $user->unreadNotifications()->count();
     }
-    public function register_device(Request $r, FcmPushService $push)
+    public function register_device(Request $r, FcmPushService $push, \App\Services\PushDiagnosticLogger $diag)
     {
         $r->validate([
             'fcm_token' => 'required|string',
@@ -114,13 +113,35 @@ class UserController extends Controller
             'device_label' => 'nullable|string|max:120',
         ]);
         $user = $r->user();
-        $push->rememberSubscription(
-            $user,
-            $r->fcm_token,
-            $r->userAgent(),
-            $r->input('platform'),
-            $r->input('device_label'),
-        );
+        $fingerprint = $push->fingerprint((string) $r->fcm_token);
+        $diag->info('REGISTER_REQUEST', [
+            'target_user_id' => $user->id,
+            'token_fingerprint' => $fingerprint,
+            'platform' => $r->input('platform'),
+            'device_label' => $r->input('device_label'),
+        ]);
+        try {
+            $push->rememberSubscription(
+                $user,
+                $r->fcm_token,
+                $r->userAgent(),
+                $r->input('platform'),
+                $r->input('device_label'),
+            );
+            $diag->info('REGISTER_SAVED', [
+                'target_user_id' => $user->id,
+                'token_fingerprint' => $fingerprint,
+                'platform' => $r->input('platform'),
+                'result' => 'REGISTER_SAVED',
+            ]);
+        } catch (\Throwable $e) {
+            $diag->exception('REGISTER_FAILED', $e, [
+                'target_user_id' => $user->id,
+                'token_fingerprint' => $fingerprint,
+                'result' => 'REGISTER_FAILED',
+            ]);
+            throw $e;
+        }
 
         return redirect()->back()->with('success', 'Registrasi notifikasi berhasil! Subscription tersimpan.');
     }
@@ -141,14 +162,24 @@ class UserController extends Controller
         $r->validate([
             'token_hash' => 'nullable|string|max:64',
             'mode' => 'nullable|in:current,all',
+            'payload_mode' => 'nullable|in:notification,data',
         ]);
 
         $user = $r->user();
         $mode = $r->input('mode', 'current');
+        $payloadMode = (string) $r->input('payload_mode', $mode === 'current' ? 'notification' : 'data');
         $clientHash = strtolower(trim((string) $r->input('token_hash', '')));
         $serverHashes = $push->tokenHashesForUser($user);
         $matched = $clientHash !== '' && in_array($clientHash, $serverHashes, true);
         $traceId = (string) \Illuminate\Support\Str::uuid();
+        $testUrl = url('/pasien/notifikasi');
+        $title = $payloadMode === 'notification'
+            ? 'Control TB Push Test'
+            : 'Control TB Data Test';
+        $body = $payloadMode === 'notification'
+            ? 'FCM notification payload test'
+            : 'FCM data-only payload test';
+        $extra = ['_payload_mode' => $payloadMode];
 
         if ($mode === 'current') {
             if ($clientHash === '') {
@@ -167,23 +198,25 @@ class UserController extends Controller
                 $send = $push->sendToHash(
                     $user,
                     $clientHash,
-                    'Test Notifikasi Control TB',
-                    'Web Push Control TB berhasil diterima.',
-                    route('dashboard'),
+                    $title,
+                    $body,
+                    $testUrl,
                     0,
                     $traceId,
-                    'test_current_device',
+                    $payloadMode === 'notification' ? 'test_mode_a_notification' : 'test_mode_b_data',
+                    $extra,
                 );
             }
         } else {
             $send = $push->sendToUser(
                 $user,
-                'Test Notifikasi Control TB',
-                'Web Push Control TB berhasil diterima.',
-                route('dashboard'),
+                $title,
+                $body,
+                $testUrl,
                 0,
                 $traceId,
                 'test_all_devices',
+                $extra,
             );
         }
 
@@ -191,19 +224,19 @@ class UserController extends Controller
         $sent = (int) ($send['subscriptions_sent'] ?? 0);
         $failed = (int) ($send['subscriptions_failed'] ?? 0);
 
-        Log::info('[PUSH TEST]', [
-            'user_id' => $user->id,
-            'mode' => $mode,
-            'trace_id' => $send['trace_id'] ?? $traceId,
+        app(\App\Services\PushDiagnosticLogger::class)->info('TEST_RESULT', [
+            'push_trace_id' => $send['trace_id'] ?? $traceId,
+            'target_user_id' => $user->id,
+            'notification_type' => $mode === 'current'
+                ? ($payloadMode === 'notification' ? 'test_mode_a_notification' : 'test_mode_b_data')
+                : 'test_all_devices',
+            'payload_mode' => $payloadMode,
             'subscription_count' => $found,
-            'success_count' => $sent,
-            'failed_count' => $failed,
-            'reason' => $send['reason'] ?? null,
-            'http_status' => $send['status'] ?? null,
-            'fcm_project_id' => $push->projectId(),
-            'message_id' => $send['message_id'] ?? null,
+            'result' => $send['reason'] ?? null,
+            'fcm_http_status' => $send['status'] ?? null,
+            'fcm_message_id' => $send['message_id'] ?? null,
             'token_fingerprint' => $send['token_fingerprint'] ?? null,
-            'device_match' => $matched ? 'MATCHED' : 'MISMATCHED',
+            'firebase_project' => $push->projectId(),
         ]);
 
         $result = [
@@ -214,8 +247,11 @@ class UserController extends Controller
             'reason' => $send['reason'] ?? null,
             'delivery' => $send['delivery'] ?? $send['reason'] ?? null,
             'display' => 'DISPLAY_PENDING',
+            'raw_push_received' => $push->ackStage($send['trace_id'] ?? $traceId, 'raw_push_received'),
+            'payload_parsed' => $push->ackStage($send['trace_id'] ?? $traceId, 'payload_parsed'),
             'browser_received' => $push->ackStage($send['trace_id'] ?? $traceId, 'browser_received'),
             'display_requested' => $push->ackStage($send['trace_id'] ?? $traceId, 'display_requested'),
+            'payload_mode' => $payloadMode,
             'fcm_project_id' => $push->projectId(),
             'credential_project_id' => $push->credentialProjectId(),
             'message_id' => $send['message_id'] ?? null,
@@ -231,8 +267,8 @@ class UserController extends Controller
 
         $flashKey = $result['success'] ? 'success' : 'error';
         $flashMessage = $result['success']
-            ? 'FCM_ACCEPTED (trace '.$result['trace_id'].'). Bukan jaminan notification bar. Tunggu BROWSER_RECEIVED / DISPLAY_REQUESTED.'
-            : 'Test Web Push gagal: '.$result['reason'];
+            ? 'FCM_ACCEPTED ('.$payloadMode.'). Trace: '.$result['trace_id'].'. Bukan bukti browser menerima. Hop berikutnya: RAW_PUSH_RECEIVED atau FOREGROUND_RECEIVED.'
+            : 'Test Web Push gagal: '.$result['reason'].' · Trace: '.$result['trace_id'];
 
         return redirect()->back()->with($flashKey, $flashMessage)->with('push_test', $result);
     }

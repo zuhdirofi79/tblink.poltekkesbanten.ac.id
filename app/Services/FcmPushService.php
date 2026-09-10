@@ -6,13 +6,14 @@ use App\Models\HistoryJadwalObatPasien;
 use App\Models\User;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class FcmPushService
 {
-    public function __construct(private PushSubscriptionStore $store)
-    {
+    public function __construct(
+        private PushSubscriptionStore $store,
+        private PushDiagnosticLogger $diag,
+    ) {
     }
 
     /**
@@ -27,11 +28,32 @@ class FcmPushService
         $traceId = $traceId !== '' ? $traceId : (string) Str::uuid();
 
         if ($token === '') {
+            $this->diag->warning('NO_SUBSCRIPTION', [
+                'push_trace_id' => $traceId,
+                'result' => 'empty_token',
+                'error_code' => 'empty_token',
+                'notification_type' => $type,
+            ]);
+
             return $this->result(false, null, 'empty_token', null, $fingerprint, $traceId);
         }
 
         $url = $url !== '' ? $url : rtrim((string) config('app.url'), '/').'/dashboard';
         $icon = rtrim((string) config('app.url'), '/').'/menkes192.png';
+        $targetUserId = isset($extraData['_target_user_id']) ? (int) $extraData['_target_user_id'] : null;
+        $deviceSource = (string) ($extraData['_source'] ?? '');
+        $deviceLabel = (string) ($extraData['_device_label'] ?? '');
+        $platform = (string) ($extraData['_platform'] ?? '');
+        $lastSeenAt = (string) ($extraData['_last_seen_at'] ?? '');
+        $payloadMode = strtolower((string) ($extraData['_payload_mode'] ?? 'data'));
+        if (! in_array($payloadMode, ['notification', 'data'], true)) {
+            $payloadMode = 'data';
+        }
+        foreach (array_keys($extraData) as $key) {
+            if (str_starts_with((string) $key, '_')) {
+                unset($extraData[$key]);
+            }
+        }
         $tag = (string) ($extraData['tag'] ?? ($historyJadwalObatId > 0
             ? 'medication-'.$historyJadwalObatId
             : 'controltb-reminder'));
@@ -41,7 +63,15 @@ class FcmPushService
             $projectId = $this->projectId();
 
             if ($projectId === '') {
-                Log::warning('[PUSH] FCM project id is missing', ['trace_id' => $traceId]);
+                $this->diag->warning('FCM_REJECTED', [
+                    'push_trace_id' => $traceId,
+                    'result' => 'missing_project_id',
+                    'error_code' => 'missing_project_id',
+                    'token_fingerprint' => $fingerprint,
+                    'target_user_id' => $targetUserId,
+                    'notification_type' => $type,
+                    'history_id' => $historyJadwalObatId ?: null,
+                ]);
 
                 return $this->result(false, null, 'missing_project_id', null, $fingerprint, $traceId);
             }
@@ -57,30 +87,65 @@ class FcmPushService
                 'type' => $type,
                 'history_id' => (string) $historyJadwalObatId,
                 'push_trace_id' => $traceId,
+                'payload_mode' => $payloadMode,
+                'ack_raw' => $this->ackUrl($traceId, 'raw_push_received'),
+                'ack_parsed' => $this->ackUrl($traceId, 'payload_parsed'),
+                'ack_parse_failed' => $this->ackUrl($traceId, 'payload_parse_failed'),
                 'ack_received' => $this->ackUrl($traceId, 'browser_received'),
                 'ack_displayed' => $this->ackUrl($traceId, 'display_requested'),
+                'ack_failed' => $this->ackUrl($traceId, 'display_failed'),
+                'ack_clicked' => $this->ackUrl($traceId, 'notification_clicked'),
             ];
             foreach ($extraData as $key => $value) {
-                if ($value === null || $value === '') {
-                    continue;
-                }
-                $data[(string) $key] = is_scalar($value) ? (string) $value : json_encode($value);
+                $data[(string) $key] = $value;
             }
+            $data = $this->stringifyDataMap($data);
 
-            $payload = [
-                'message' => [
-                    'token' => $token,
-                    'data' => $data,
-                    'webpush' => [
-                        'headers' => [
-                            'Urgency' => 'high',
-                        ],
-                        'fcm_options' => [
-                            'link' => $url,
-                        ],
+            $message = [
+                'token' => $token,
+                'data' => $data,
+                'webpush' => [
+                    'headers' => [
+                        'Urgency' => 'high',
+                    ],
+                    'fcm_options' => [
+                        'link' => $url,
                     ],
                 ],
             ];
+
+            if ($payloadMode === 'notification') {
+                $message['notification'] = [
+                    'title' => $title,
+                    'body' => $body,
+                ];
+                $message['webpush']['notification'] = [
+                    'title' => $title,
+                    'body' => $body,
+                    'icon' => $icon,
+                ];
+            }
+
+            $payload = [
+                'message' => $message,
+            ];
+
+            $this->diag->info('FCM_SEND_START', [
+                'push_trace_id' => $traceId,
+                'firebase_project' => $projectId,
+                'target_user_id' => $targetUserId,
+                'token_fingerprint' => $fingerprint,
+                'notification_type' => $type,
+                'payload_mode' => $payloadMode,
+                'has_notification_block' => $payloadMode === 'notification',
+                'data_keys' => implode(',', array_keys($data)),
+                'all_data_strings' => $this->allValuesAreStrings($data),
+                'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
+                'source' => $deviceSource ?: null,
+                'platform' => $platform ?: null,
+                'device_label' => $deviceLabel ?: null,
+                'last_seen_at' => $lastSeenAt ?: null,
+            ]);
 
             $response = Http::withToken($accessToken)
                 ->acceptJson()
@@ -90,48 +155,82 @@ class FcmPushService
             $bodyText = $response->body();
             $decoded = $response->json();
             $messageId = is_array($decoded) ? ($decoded['name'] ?? null) : null;
+            $firebase = $this->firebaseError($status, $bodyText);
 
             if ($response->successful()) {
-                Log::info('[FCM_ACCEPTED]', [
-                    'trace_id' => $traceId,
-                    'project' => $projectId,
+                $this->diag->info('FCM_ACCEPTED', [
+                    'push_trace_id' => $traceId,
+                    'firebase_project' => $projectId,
+                    'target_user_id' => $targetUserId,
                     'token_fingerprint' => $fingerprint,
-                    'message_id' => $messageId,
-                    'http_status' => $status,
-                    'message_type' => 'data',
-                    'type' => $type,
+                    'notification_type' => $type,
+                    'payload_mode' => $payloadMode,
+                    'fcm_http_status' => $status,
+                    'fcm_message_id' => $messageId,
+                    'result' => 'FCM_ACCEPTED',
+                    'next_expected_hop' => 'RAW_PUSH_RECEIVED or FOREGROUND_RECEIVED',
+                    'failed_hop_if_silent' => 'FCM_ACCEPTED → BROWSER_RECEIVED',
+                    'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
                 ]);
 
                 return $this->result(true, $status, 'FCM_ACCEPTED', is_string($messageId) ? $messageId : null, $fingerprint, $traceId);
             }
 
+            if ($this->isProjectMismatch($firebase['error_code'], $bodyText)) {
+                $this->diag->error('TOKEN_PROJECT_MISMATCH', [
+                    'push_trace_id' => $traceId,
+                    'firebase_project' => $projectId,
+                    'target_user_id' => $targetUserId,
+                    'token_fingerprint' => $fingerprint,
+                    'notification_type' => $type,
+                    'fcm_http_status' => $status,
+                    'error_code' => $firebase['error_code'],
+                    'result' => 'TOKEN_PROJECT_MISMATCH',
+                ]);
+            }
+
             if ($this->isExpiredSubscription($status, $bodyText)) {
                 $this->forgetToken($token);
-                Log::warning('[PUSH] Expired subscription removed', [
-                    'http_status' => $status,
-                    'reason' => 'expired_or_unregistered',
+                $this->diag->warning('TOKEN_INVALID', [
+                    'push_trace_id' => $traceId,
+                    'firebase_project' => $projectId,
+                    'target_user_id' => $targetUserId,
                     'token_fingerprint' => $fingerprint,
-                    'trace_id' => $traceId,
+                    'notification_type' => $type,
+                    'fcm_http_status' => $status,
+                    'error_code' => $firebase['error_code'] ?: 'UNREGISTERED',
+                    'result' => 'TOKEN_INVALID',
+                ]);
+                $this->diag->warning('TOKEN_REMOVED', [
+                    'push_trace_id' => $traceId,
+                    'token_fingerprint' => $fingerprint,
+                    'target_user_id' => $targetUserId,
+                    'result' => 'TOKEN_REMOVED',
                 ]);
 
                 return $this->result(false, $status, 'expired_subscription', null, $fingerprint, $traceId);
             }
 
-            $reason = $this->safeErrorReason($bodyText);
-            Log::warning('[PUSH] FCM send failed', [
-                'http_status' => $status,
-                'reason' => $reason,
+            $this->diag->warning('FCM_REJECTED', [
+                'push_trace_id' => $traceId,
+                'firebase_project' => $projectId,
+                'target_user_id' => $targetUserId,
                 'token_fingerprint' => $fingerprint,
-                'project' => $projectId,
-                'trace_id' => $traceId,
+                'notification_type' => $type,
+                'fcm_http_status' => $status,
+                'error_code' => $firebase['error_code'],
+                'result' => 'FCM_REJECTED',
+                'message' => $firebase['message'],
             ]);
 
-            return $this->result(false, $status, $reason, null, $fingerprint, $traceId);
+            return $this->result(false, $status, $firebase['error_code'] ?: 'fcm_error', null, $fingerprint, $traceId);
         } catch (\Throwable $e) {
-            Log::error('[PUSH] FCM send exception', [
-                'message' => $e->getMessage(),
+            $this->diag->exception('FCM_EXCEPTION', $e, [
+                'push_trace_id' => $traceId,
+                'target_user_id' => $targetUserId,
                 'token_fingerprint' => $fingerprint,
-                'trace_id' => $traceId,
+                'notification_type' => $type,
+                'result' => 'FCM_EXCEPTION',
             ]);
 
             return $this->result(false, null, 'exception', null, $fingerprint, $traceId);
@@ -175,8 +274,51 @@ class FcmPushService
         $failed = 0;
         $last = $this->result(false, null, 'empty_token', null, '', $traceId);
 
+        $this->diag->info('SUBSCRIPTIONS_FOUND', [
+            'push_trace_id' => $traceId,
+            'target_user_id' => $user?->id,
+            'subscription_count' => count($tokens),
+            'notification_type' => $type,
+            'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
+        ]);
+
+        if ($tokens === []) {
+            $this->diag->warning('NO_SUBSCRIPTION', [
+                'push_trace_id' => $traceId,
+                'target_user_id' => $user?->id,
+                'subscription_count' => 0,
+                'notification_type' => $type,
+                'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
+                'result' => 'NO_SUBSCRIPTION',
+            ]);
+            $last['reason'] = 'empty_token';
+            $last['subscriptions_found'] = 0;
+            $last['subscriptions_sent'] = 0;
+            $last['subscriptions_failed'] = 0;
+            $last['trace_id'] = $traceId;
+
+            return $last;
+        }
+
         foreach ($tokens as $token) {
-            $last = $this->send($token, $title, $body, $url, $historyJadwalObatId, $traceId, $type, $extraData);
+            $meta = $user ? $this->store->metadataForToken($user, $token) : [];
+            $this->diag->info('DEVICE_TARGET', [
+                'push_trace_id' => $traceId,
+                'target_user_id' => $user?->id,
+                'token_fingerprint' => $this->fingerprint($token),
+                'platform' => $meta['platform'] ?? null,
+                'device_label' => $meta['device_label'] ?? null,
+                'last_seen_at' => $meta['last_seen_at'] ?? null,
+                'source' => $meta['source'] ?? null,
+                'notification_type' => $type,
+            ]);
+            $last = $this->send($token, $title, $body, $url, $historyJadwalObatId, $traceId, $type, array_merge($extraData, [
+                '_target_user_id' => $user?->id,
+                '_source' => $meta['source'] ?? null,
+                '_platform' => $meta['platform'] ?? null,
+                '_device_label' => $meta['device_label'] ?? null,
+                '_last_seen_at' => $meta['last_seen_at'] ?? null,
+            ]));
             if ($last['success']) {
                 $sent++;
             } else {
@@ -184,9 +326,7 @@ class FcmPushService
             }
         }
 
-        if ($tokens === []) {
-            $last['reason'] = 'empty_token';
-        } elseif ($sent > 0) {
+        if ($sent > 0) {
             $last['success'] = true;
             $last['reason'] = 'FCM_ACCEPTED';
             $last['delivery'] = 'FCM_ACCEPTED';
@@ -201,11 +341,19 @@ class FcmPushService
         return $last;
     }
 
-    public function sendToHash(User $user, string $tokenHash, string $title, string $body, string $url = '', int $historyJadwalObatId = 0, string $traceId = '', string $type = 'push'): array
+    public function sendToHash(User $user, string $tokenHash, string $title, string $body, string $url = '', int $historyJadwalObatId = 0, string $traceId = '', string $type = 'push', array $extraData = []): array
     {
         $traceId = $traceId !== '' ? $traceId : (string) Str::uuid();
         $token = $this->store->tokenForHash($user, $tokenHash);
         if (! $token) {
+            $this->diag->warning('NO_SUBSCRIPTION', [
+                'push_trace_id' => $traceId,
+                'target_user_id' => $user->id,
+                'subscription_count' => 0,
+                'notification_type' => $type,
+                'result' => 'CURRENT_DEVICE_NOT_REGISTERED',
+                'token_fingerprint' => substr($tokenHash, 0, 12),
+            ]);
             $empty = $this->result(false, null, 'CURRENT_DEVICE_NOT_REGISTERED', null, '', $traceId);
             $empty['subscriptions_found'] = 0;
             $empty['subscriptions_sent'] = 0;
@@ -214,7 +362,24 @@ class FcmPushService
             return $empty;
         }
 
-        $send = $this->send($token, $title, $body, $url, $historyJadwalObatId, $traceId, $type);
+        $meta = $this->store->metadataForToken($user, $token);
+        $this->diag->info('DEVICE_TARGET', [
+            'push_trace_id' => $traceId,
+            'target_user_id' => $user->id,
+            'token_fingerprint' => $this->fingerprint($token),
+            'platform' => $meta['platform'] ?? null,
+            'device_label' => $meta['device_label'] ?? null,
+            'last_seen_at' => $meta['last_seen_at'] ?? null,
+            'source' => $meta['source'] ?? null,
+            'notification_type' => $type,
+        ]);
+        $send = $this->send($token, $title, $body, $url, $historyJadwalObatId, $traceId, $type, array_merge($extraData, [
+            '_target_user_id' => $user->id,
+            '_source' => $meta['source'] ?? null,
+            '_platform' => $meta['platform'] ?? null,
+            '_device_label' => $meta['device_label'] ?? null,
+            '_last_seen_at' => $meta['last_seen_at'] ?? null,
+        ]));
         if ($send['success']) {
             $this->markHistoryNotified($historyJadwalObatId, $user->id);
         }
@@ -264,9 +429,10 @@ class FcmPushService
 
         if (! in_array($fromConfig, $stale, true)) {
             if ($fromFile !== '' && $fromFile !== $fromConfig) {
-                Log::warning('[PUSH] FCM_PROJECT_ID differs from service account project_id', [
-                    'fcm_project_id' => $fromConfig,
+                $this->diag->warning('TOKEN_PROJECT_MISMATCH', [
+                    'firebase_project' => $fromConfig,
                     'credential_project_id' => $fromFile,
+                    'result' => 'config_credential_mismatch',
                 ]);
             }
 
@@ -319,6 +485,52 @@ class FcmPushService
             'delivery' => $success ? 'FCM_ACCEPTED' : $reason,
             'trace_id' => $traceId,
         ];
+    }
+
+    /**
+     * HTTP v1 FCM data map values must be strings.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, string>
+     */
+    private function stringifyDataMap(array $data): array
+    {
+        $out = [];
+        foreach ($data as $key => $value) {
+            if ($value === null || $value === '') {
+                continue;
+            }
+            if (is_bool($value)) {
+                $out[(string) $key] = $value ? '1' : '0';
+
+                continue;
+            }
+            if (is_scalar($value)) {
+                $out[(string) $key] = (string) $value;
+
+                continue;
+            }
+            $encoded = json_encode($value);
+            if (is_string($encoded) && $encoded !== '') {
+                $out[(string) $key] = $encoded;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     */
+    private function allValuesAreStrings(array $data): bool
+    {
+        foreach ($data as $value) {
+            if (! is_string($value)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function ackUrl(string $traceId, string $stage): string
@@ -374,6 +586,34 @@ class FcmPushService
         $decoded = json_decode((string) file_get_contents($path), true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function firebaseError(int $status, string $body): array
+    {
+        $decoded = json_decode($body, true);
+        $statusName = is_array($decoded) ? ($decoded['error']['status'] ?? null) : null;
+        $code = is_array($decoded) ? ($decoded['error']['code'] ?? null) : null;
+        $message = is_array($decoded) ? ($decoded['error']['message'] ?? null) : null;
+        $errorCode = trim(($status ?: '').' '.($statusName ?: ''));
+        if (is_string($message) && str_contains($message, 'SENDER_ID_MISMATCH')) {
+            $errorCode = trim($errorCode.' SENDER_ID_MISMATCH');
+        }
+        if ($statusName) {
+            $errorCode = trim(($code ? $code.' ' : '').$statusName);
+        }
+
+        return [
+            'error_code' => $errorCode !== '' ? $errorCode : (string) $status,
+            'message' => is_string($message) ? substr($message, 0, 200) : null,
+        ];
+    }
+
+    private function isProjectMismatch(?string $errorCode, string $body): bool
+    {
+        $haystack = strtoupper(($errorCode ?? '').' '.$body);
+
+        return str_contains($haystack, 'SENDER_ID_MISMATCH')
+            || str_contains($haystack, 'SENDERIDMISMATCH');
     }
 
     private function isExpiredSubscription(int $status, string $body): bool
