@@ -4,57 +4,73 @@ namespace App\Services;
 
 use App\Models\HistoryJadwalObatPasien;
 use App\Models\User;
-use App\Models\UserPushSubscription;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 class FcmPushService
 {
+    public function __construct(private PushSubscriptionStore $store)
+    {
+    }
+
     /**
      * Send a visible Web Push via FCM to a single device token.
      *
-     * @return array{success: bool, status: int|null, reason: string, message_id: ?string, token_fingerprint: string, delivery: string}
+     * @return array{success: bool, status: int|null, reason: string, message_id: ?string, token_fingerprint: string, delivery: string, trace_id: string}
      */
-    public function send(string $token, string $title, string $body, string $url = '', int $historyJadwalObatId = 0): array
+    public function send(string $token, string $title, string $body, string $url = '', int $historyJadwalObatId = 0, string $traceId = '', string $type = 'push', array $extraData = []): array
     {
         $token = trim($token);
         $fingerprint = $this->fingerprint($token);
+        $traceId = $traceId !== '' ? $traceId : (string) Str::uuid();
 
         if ($token === '') {
-            return $this->result(false, null, 'empty_token', null, $fingerprint);
+            return $this->result(false, null, 'empty_token', null, $fingerprint, $traceId);
         }
 
         $url = $url !== '' ? $url : rtrim((string) config('app.url'), '/').'/dashboard';
         $icon = rtrim((string) config('app.url'), '/').'/menkes192.png';
-        $tag = $historyJadwalObatId > 0
-            ? 'controltb-obat-'.$historyJadwalObatId
-            : 'controltb-reminder';
+        $tag = (string) ($extraData['tag'] ?? ($historyJadwalObatId > 0
+            ? 'medication-'.$historyJadwalObatId
+            : 'controltb-reminder'));
 
         try {
             $accessToken = $this->accessToken();
             $projectId = $this->projectId();
 
             if ($projectId === '') {
-                Log::warning('[PUSH] FCM project id is missing');
+                Log::warning('[PUSH] FCM project id is missing', ['trace_id' => $traceId]);
 
-                return $this->result(false, null, 'missing_project_id', null, $fingerprint);
+                return $this->result(false, null, 'missing_project_id', null, $fingerprint, $traceId);
             }
 
-            // Data-only: Chrome will not auto-display. SW/onMessage must call showNotification.
+            $data = [
+                'title' => $title,
+                'body' => $body,
+                'link' => $url,
+                'url' => $url,
+                'icon' => $icon,
+                'badge' => $icon,
+                'tag' => $tag,
+                'type' => $type,
+                'history_id' => (string) $historyJadwalObatId,
+                'push_trace_id' => $traceId,
+                'ack_received' => $this->ackUrl($traceId, 'browser_received'),
+                'ack_displayed' => $this->ackUrl($traceId, 'display_requested'),
+            ];
+            foreach ($extraData as $key => $value) {
+                if ($value === null || $value === '') {
+                    continue;
+                }
+                $data[(string) $key] = is_scalar($value) ? (string) $value : json_encode($value);
+            }
+
             $payload = [
                 'message' => [
                     'token' => $token,
-                    'data' => [
-                        'title' => $title,
-                        'body' => $body,
-                        'link' => $url,
-                        'url' => $url,
-                        'icon' => $icon,
-                        'badge' => $icon,
-                        'tag' => $tag,
-                    ],
+                    'data' => $data,
                     'webpush' => [
                         'headers' => [
                             'Urgency' => 'high',
@@ -76,28 +92,29 @@ class FcmPushService
             $messageId = is_array($decoded) ? ($decoded['name'] ?? null) : null;
 
             if ($response->successful()) {
-                $this->markHistoryNotified($historyJadwalObatId);
-                Log::info('[PUSH] FCM_ACCEPTED', [
+                Log::info('[FCM_ACCEPTED]', [
+                    'trace_id' => $traceId,
                     'project' => $projectId,
                     'token_fingerprint' => $fingerprint,
                     'message_id' => $messageId,
                     'http_status' => $status,
                     'message_type' => 'data',
+                    'type' => $type,
                 ]);
 
-                return $this->result(true, $status, 'FCM_ACCEPTED', is_string($messageId) ? $messageId : null, $fingerprint);
+                return $this->result(true, $status, 'FCM_ACCEPTED', is_string($messageId) ? $messageId : null, $fingerprint, $traceId);
             }
 
             if ($this->isExpiredSubscription($status, $bodyText)) {
                 $this->forgetToken($token);
                 Log::warning('[PUSH] Expired subscription removed', [
-                    'user_ids' => User::where('device_token', $token)->pluck('id')->all(),
                     'http_status' => $status,
                     'reason' => 'expired_or_unregistered',
                     'token_fingerprint' => $fingerprint,
+                    'trace_id' => $traceId,
                 ]);
 
-                return $this->result(false, $status, 'expired_subscription', null, $fingerprint);
+                return $this->result(false, $status, 'expired_subscription', null, $fingerprint, $traceId);
             }
 
             $reason = $this->safeErrorReason($bodyText);
@@ -106,16 +123,18 @@ class FcmPushService
                 'reason' => $reason,
                 'token_fingerprint' => $fingerprint,
                 'project' => $projectId,
+                'trace_id' => $traceId,
             ]);
 
-            return $this->result(false, $status, $reason, null, $fingerprint);
+            return $this->result(false, $status, $reason, null, $fingerprint, $traceId);
         } catch (\Throwable $e) {
             Log::error('[PUSH] FCM send exception', [
                 'message' => $e->getMessage(),
                 'token_fingerprint' => $fingerprint,
+                'trace_id' => $traceId,
             ]);
 
-            return $this->result(false, null, 'exception', null, $fingerprint);
+            return $this->result(false, null, 'exception', null, $fingerprint, $traceId);
         }
     }
 
@@ -128,35 +147,36 @@ class FcmPushService
             return [];
         }
 
-        $tokens = [];
+        return $this->store->tokensFor($user);
+    }
 
-        if (Schema::hasTable('user_push_subscriptions')) {
-            $tokens = UserPushSubscription::query()
-                ->where('user_id', $user->id)
-                ->pluck('token')
-                ->all();
+    public function tokenHashesForUser(?User $user): array
+    {
+        if (! $user) {
+            return [];
         }
 
-        $legacy = trim((string) $user->device_token);
-        if ($legacy !== '' && ! in_array($legacy, $tokens, true)) {
-            $tokens[] = $legacy;
-        }
+        return $this->store->hashesFor($user);
+    }
 
-        return array_values(array_unique(array_filter(array_map('trim', $tokens))));
+    public function fingerprintsForUser(?User $user): array
+    {
+        return array_map(fn (string $hash) => substr($hash, 0, 12), $this->tokenHashesForUser($user));
     }
 
     /**
-     * @return array{success: bool, status: int|null, reason: string, message_id: ?string, token_fingerprint: string, delivery: string, subscriptions_found: int, subscriptions_sent: int, subscriptions_failed: int}
+     * @return array{success: bool, status: int|null, reason: string, message_id: ?string, token_fingerprint: string, delivery: string, subscriptions_found: int, subscriptions_sent: int, subscriptions_failed: int, trace_id: string}
      */
-    public function sendToUser(?User $user, string $title, string $body, string $url = '', int $historyJadwalObatId = 0): array
+    public function sendToUser(?User $user, string $title, string $body, string $url = '', int $historyJadwalObatId = 0, string $traceId = '', string $type = 'push', array $extraData = []): array
     {
+        $traceId = $traceId !== '' ? $traceId : (string) Str::uuid();
         $tokens = $this->tokensForUser($user);
         $sent = 0;
         $failed = 0;
-        $last = $this->result(false, null, 'empty_token', null, '');
+        $last = $this->result(false, null, 'empty_token', null, '', $traceId);
 
         foreach ($tokens as $token) {
-            $last = $this->send($token, $title, $body, $url, $historyJadwalObatId);
+            $last = $this->send($token, $title, $body, $url, $historyJadwalObatId, $traceId, $type, $extraData);
             if ($last['success']) {
                 $sent++;
             } else {
@@ -170,63 +190,56 @@ class FcmPushService
             $last['success'] = true;
             $last['reason'] = 'FCM_ACCEPTED';
             $last['delivery'] = 'FCM_ACCEPTED';
+            $this->markHistoryNotified($historyJadwalObatId, $user?->id);
         }
 
         $last['subscriptions_found'] = count($tokens);
         $last['subscriptions_sent'] = $sent;
         $last['subscriptions_failed'] = $failed;
+        $last['trace_id'] = $traceId;
 
         return $last;
     }
 
-    public function rememberSubscription(User $user, string $token, ?string $userAgent = null, ?string $platform = null, ?string $deviceLabel = null): void
+    public function sendToHash(User $user, string $tokenHash, string $title, string $body, string $url = '', int $historyJadwalObatId = 0, string $traceId = '', string $type = 'push'): array
     {
-        $token = trim($token);
-        $user->forceFill(['device_token' => $token])->save();
+        $traceId = $traceId !== '' ? $traceId : (string) Str::uuid();
+        $token = $this->store->tokenForHash($user, $tokenHash);
+        if (! $token) {
+            $empty = $this->result(false, null, 'CURRENT_DEVICE_NOT_REGISTERED', null, '', $traceId);
+            $empty['subscriptions_found'] = 0;
+            $empty['subscriptions_sent'] = 0;
+            $empty['subscriptions_failed'] = 0;
 
-        if ($token === '' || ! Schema::hasTable('user_push_subscriptions')) {
-            return;
+            return $empty;
         }
 
-        UserPushSubscription::query()->updateOrCreate(
-            ['token_hash' => hash('sha256', $token)],
-            [
-                'user_id' => $user->id,
-                'token' => $token,
-                'device_label' => $deviceLabel,
-                'user_agent' => $userAgent,
-                'platform' => $platform,
-                'last_seen_at' => now(),
-            ],
-        );
+        $send = $this->send($token, $title, $body, $url, $historyJadwalObatId, $traceId, $type);
+        if ($send['success']) {
+            $this->markHistoryNotified($historyJadwalObatId, $user->id);
+        }
+        $send['subscriptions_found'] = 1;
+        $send['subscriptions_sent'] = $send['success'] ? 1 : 0;
+        $send['subscriptions_failed'] = $send['success'] ? 0 : 1;
+
+        return $send;
+    }
+
+    public function rememberSubscription(User $user, string $token, ?string $userAgent = null, ?string $platform = null, ?string $deviceLabel = null): void
+    {
+        $this->store->upsert($user, $token, $userAgent, $platform, $deviceLabel);
     }
 
     public function forgetCurrentDevice(User $user, ?string $token = null): void
     {
-        $token = trim((string) $token);
+        $this->store->forget($user, $token);
+    }
 
-        if ($token !== '' && Schema::hasTable('user_push_subscriptions')) {
-            UserPushSubscription::query()
-                ->where('user_id', $user->id)
-                ->where('token_hash', hash('sha256', $token))
-                ->delete();
-        }
+    public function ackStage(string $traceId, string $stage): ?string
+    {
+        $value = Cache::get('push_ack:'.$traceId.':'.$stage);
 
-        $legacy = trim((string) $user->device_token);
-        $legacyMatches = $token === '' || ($legacy !== '' && hash_equals($legacy, $token));
-
-        if (! $legacyMatches) {
-            return;
-        }
-
-        $replacement = null;
-        if (Schema::hasTable('user_push_subscriptions')) {
-            $replacement = UserPushSubscription::query()
-                ->where('user_id', $user->id)
-                ->value('token');
-        }
-
-        $user->forceFill(['device_token' => $replacement])->save();
+        return is_string($value) ? $value : null;
     }
 
     public function tokenHash(?string $token): ?string
@@ -293,9 +306,9 @@ class FcmPushService
     }
 
     /**
-     * @return array{success: bool, status: int|null, reason: string, message_id: ?string, token_fingerprint: string, delivery: string}
+     * @return array{success: bool, status: int|null, reason: string, message_id: ?string, token_fingerprint: string, delivery: string, trace_id: string}
      */
-    private function result(bool $success, ?int $status, string $reason, ?string $messageId, string $fingerprint): array
+    private function result(bool $success, ?int $status, string $reason, ?string $messageId, string $fingerprint, string $traceId = ''): array
     {
         return [
             'success' => $success,
@@ -304,7 +317,21 @@ class FcmPushService
             'message_id' => $messageId,
             'token_fingerprint' => $fingerprint,
             'delivery' => $success ? 'FCM_ACCEPTED' : $reason,
+            'trace_id' => $traceId,
         ];
+    }
+
+    private function ackUrl(string $traceId, string $stage): string
+    {
+        $exp = now()->addHour()->timestamp;
+        $sig = hash_hmac('sha256', $traceId.'|'.$stage.'|'.$exp, (string) config('app.key'));
+
+        return url('/push/ack').'?'.http_build_query([
+            't' => $traceId,
+            's' => $stage,
+            'e' => $exp,
+            'sig' => $sig,
+        ]);
     }
 
     private function accessToken(): string
@@ -361,18 +388,12 @@ class FcmPushService
 
     private function forgetToken(string $token): void
     {
-        User::where('device_token', $token)->update(['device_token' => null]);
-
-        if (Schema::hasTable('user_push_subscriptions')) {
-            UserPushSubscription::query()
-                ->where('token_hash', hash('sha256', $token))
-                ->delete();
-        }
+        $this->store->forgetToken($token);
     }
 
-    private function markHistoryNotified(int $historyJadwalObatId): void
+    private function markHistoryNotified(int $historyJadwalObatId, ?int $userId = null): void
     {
-        if ($historyJadwalObatId <= 0) {
+        if ($historyJadwalObatId <= 0 || ! $userId) {
             return;
         }
 
@@ -382,7 +403,16 @@ class FcmPushService
         }
 
         $sent = is_array($history->notifikasi_dikirim) ? $history->notifikasi_dikirim : [];
-        $sent[] = now()->isoFormat('DD/MM/YYYY HH:mm');
+        foreach ($sent as $entry) {
+            if (is_array($entry) && (int) ($entry['user_id'] ?? 0) === $userId) {
+                return;
+            }
+        }
+
+        $sent[] = [
+            'user_id' => $userId,
+            'at' => now()->toIso8601String(),
+        ];
         $history->notifikasi_dikirim = $sent;
         $history->save();
     }

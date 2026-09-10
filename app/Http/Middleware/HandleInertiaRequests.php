@@ -55,20 +55,27 @@ class HandleInertiaRequests extends Middleware
             'auth' => [
                 'user' => $u,
             ],
-            'push' => [
-                'vapidPublicKey' => config('fcm.vapid_public_key'),
-                'firebaseProjectId' => config('fcm.project_id'),
-                'messagingSenderId' => config('fcm.web.messagingSenderId'),
-                'serverRegistered' => (bool) ($u?->device_token),
-                'serverTokenHash' => $u?->device_token ? hash('sha256', $u->device_token) : null,
-                'multiDeviceReady' => Cache::remember('schema_user_push_subscriptions', 300, function () {
-                    try {
-                        return \Illuminate\Support\Facades\Schema::hasTable('user_push_subscriptions');
-                    } catch (\Throwable $e) {
-                        return false;
-                    }
-                }),
-            ],
+            'push' => (function () use ($u) {
+                $push = app(\App\Services\FcmPushService::class);
+                $hashes = $u ? $push->tokenHashesForUser($u) : [];
+
+                return [
+                    'vapidPublicKey' => config('fcm.vapid_public_key'),
+                    'firebaseProjectId' => config('fcm.project_id'),
+                    'messagingSenderId' => config('fcm.web.messagingSenderId'),
+                    'serverRegistered' => $hashes !== [],
+                    'serverTokenHashes' => $hashes,
+                    'serverFingerprints' => array_map(fn (string $hash) => substr($hash, 0, 12), $hashes),
+                    'multiDeviceReady' => true,
+                    'multiDeviceTable' => Cache::remember('schema_user_push_subscriptions', 300, function () {
+                        try {
+                            return \Illuminate\Support\Facades\Schema::hasTable('user_push_subscriptions');
+                        } catch (\Throwable $e) {
+                            return false;
+                        }
+                    }),
+                ];
+            })(),
         ];
     }
 }

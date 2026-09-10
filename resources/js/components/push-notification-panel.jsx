@@ -48,8 +48,9 @@ export default function PushNotificationPanel() {
     const firebaseProjectId = page.props.push?.firebaseProjectId || import.meta.env.VITE_FIREBASE_PROJECT_ID || '';
     const messagingSenderId = page.props.push?.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '';
     const serverRegistered = Boolean(page.props.push?.serverRegistered);
-    const serverTokenHash = page.props.push?.serverTokenHash || '';
-    const multiDeviceReady = Boolean(page.props.push?.multiDeviceReady);
+    const serverTokenHashes = page.props.push?.serverTokenHashes || [];
+    const serverFingerprints = page.props.push?.serverFingerprints || [];
+    const multiDeviceTable = Boolean(page.props.push?.multiDeviceTable);
     const pushTest = page.props.flash?.push_test;
 
     const [permission, setPermission] = useState(
@@ -68,6 +69,7 @@ export default function PushNotificationPanel() {
     const [lastBackground, setLastBackground] = useState('');
     const [lastDisplay, setLastDisplay] = useState('');
     const [currentToken, setCurrentToken] = useState('');
+    const [localFingerprint, setLocalFingerprint] = useState('');
 
     const httpsOk = typeof window !== 'undefined' && window.isSecureContext;
     const notificationApi = typeof window !== 'undefined' && 'Notification' in window;
@@ -98,15 +100,18 @@ export default function PushNotificationPanel() {
                 token = await peekFBToken(vapidPublicKey);
             }
             setCurrentToken(token);
-            setLocalRegistration(token ? 'ACTIVE' : 'NONE');
+            setLocalRegistration(token ? 'PRESENT' : 'NONE');
 
             const clientHash = token ? await hashToken(token) : '';
-            if (!serverTokenHash) {
-                setDeviceMatch(token ? 'MISMATCHED' : 'NOT SAVED');
-            } else if (!clientHash) {
-                setDeviceMatch('UNKNOWN');
+            setLocalFingerprint(clientHash ? fingerprintFromHash(clientHash) : '');
+            if (!token) {
+                setDeviceMatch(serverTokenHashes.length ? 'NOT ON THIS DEVICE' : 'NOT SAVED');
+            } else if (!serverTokenHashes.length) {
+                setDeviceMatch('NOT SAVED');
+            } else if (serverTokenHashes.includes(clientHash)) {
+                setDeviceMatch('MATCHED');
             } else {
-                setDeviceMatch(clientHash === serverTokenHash ? 'MATCHED' : 'MISMATCHED');
+                setDeviceMatch('MISMATCHED');
             }
 
             if (token) {
@@ -128,7 +133,7 @@ export default function PushNotificationPanel() {
 
     useEffect(() => {
         refreshStatus();
-    }, [serverRegistered, serverTokenHash]);
+    }, [serverRegistered, serverTokenHashes.join('|')]);
 
     useEffect(() => {
         const onForeground = (event) => {
@@ -147,10 +152,39 @@ export default function PushNotificationPanel() {
         window.addEventListener('controltb-fcm-background', onBackground);
         window.addEventListener('controltb-fcm-display', onDisplay);
 
+        const onSwMessage = (event) => {
+            if (event.data?.type === 'controltb-push-diag' && event.data.diag) {
+                const diag = event.data.diag;
+                if (diag.last_background_push_received_at) {
+                    setLastBackground(
+                        `${diag.title || 'push'} · ${new Date(diag.last_background_push_received_at).toLocaleTimeString()} · ${diag.trace_id || ''}`,
+                    );
+                }
+            }
+        };
+        navigator.serviceWorker?.addEventListener('message', onSwMessage);
+        navigator.serviceWorker?.controller?.postMessage({ type: 'GET_PUSH_DIAG' });
+
+        try {
+            const stored = localStorage.getItem('controltb_last_foreground');
+            if (stored) {
+                const parsed = JSON.parse(stored);
+                setLastForeground(`${parsed.title || 'message'} · ${new Date(parsed.at).toLocaleTimeString()} · ${parsed.traceId || ''}`);
+            }
+            const display = localStorage.getItem('controltb_last_foreground_display');
+            if (display) {
+                const parsed = JSON.parse(display);
+                setLastDisplay(parsed.status || 'DISPLAY_REQUESTED');
+            }
+        } catch {
+            // ignore
+        }
+
         return () => {
             window.removeEventListener('controltb-fcm-foreground', onForeground);
             window.removeEventListener('controltb-fcm-background', onBackground);
             window.removeEventListener('controltb-fcm-display', onDisplay);
+            navigator.serviceWorker?.removeEventListener('message', onSwMessage);
         };
     }, []);
 
@@ -162,9 +196,10 @@ export default function PushNotificationPanel() {
             swState === 'ACTIVE' &&
             pushManager === 'AVAILABLE' &&
             subscription === 'ACTIVE' &&
+            localRegistration === 'PRESENT' &&
             serverRegistered &&
             deviceMatch === 'MATCHED',
-        [httpsOk, notificationApi, permission, swState, pushManager, subscription, serverRegistered, deviceMatch],
+        [httpsOk, notificationApi, permission, swState, pushManager, subscription, localRegistration, serverRegistered, deviceMatch],
     );
 
     const register = async () => {
@@ -221,14 +256,17 @@ export default function PushNotificationPanel() {
         }
     };
 
-    const sendTest = async () => {
+    const sendTest = async (mode) => {
         setBusy(true);
         try {
             const token = currentToken || (await peekFBToken(vapidPublicKey));
             const tokenHash = token ? await hashToken(token) : '';
+            if (mode === 'current' && !tokenHash) {
+                throw new Error('CURRENT DEVICE IS NOT REGISTERED. Daftar Notifikasi dulu di HP ini.');
+            }
             router.post(
                 route('user.test-notif'),
-                { token_hash: tokenHash },
+                { token_hash: tokenHash, mode },
                 {
                     preserveScroll: true,
                     onSuccess: () => refreshStatus(),
@@ -279,13 +317,28 @@ export default function PushNotificationPanel() {
                 <StatusRow label="Service Worker script" value={swScript} ok={String(swScript).includes('service-worker.js')} />
                 <StatusRow label="Service Worker scope" value={swScope} ok={swScope.endsWith('/') || swScope.includes(window.location.origin + '/')} />
                 <StatusRow label="Push Manager" value={pushManager} ok={pushManager === 'AVAILABLE'} />
-                <StatusRow label="Local FCM registration" value={localRegistration} ok={localRegistration === 'ACTIVE'} />
+                <StatusRow label="Local FCM registration" value={localRegistration} ok={localRegistration === 'PRESENT'} />
+                <StatusRow label="Current local fingerprint" value={localFingerprint || 'NONE'} ok={Boolean(localFingerprint)} />
+                <StatusRow
+                    label="Server fingerprints"
+                    value={serverFingerprints.length ? serverFingerprints.join(', ') : 'NONE'}
+                    ok={serverFingerprints.length > 0}
+                />
                 <StatusRow label="Subscription" value={subscription} ok={subscription === 'ACTIVE'} />
                 <StatusRow
                     label="Server registration"
-                    value={serverRegistered ? (matchOk ? 'SAVED (THIS DEVICE)' : 'SAVED (OTHER DEVICE)') : 'NOT SAVED'}
+                    value={
+                        !serverRegistered
+                            ? 'NOT SAVED'
+                            : matchOk
+                              ? 'SAVED (THIS DEVICE)'
+                              : localRegistration === 'NONE'
+                                ? 'SAVED (OTHER DEVICE)'
+                                : 'SAVED (MULTIPLE / OTHER)'
+                    }
                     ok={serverRegistered && matchOk}
                 />
+                <StatusRow label="CURRENT DEVICE REGISTERED" value={matchOk ? 'YES' : 'NO'} ok={matchOk} />
                 <StatusRow label="CURRENT DEVICE MATCHES SERVER" value={deviceMatch} ok={matchOk} />
                 <StatusRow label="Last foreground FCM" value={lastForeground || 'NONE'} ok={Boolean(lastForeground)} />
                 <StatusRow label="Last background push" value={lastBackground || 'NONE'} ok={Boolean(lastBackground)} />
@@ -298,28 +351,33 @@ export default function PushNotificationPanel() {
                 </p>
             ) : null}
 
-            {deviceMatch === 'MISMATCHED' ? (
+            {localRegistration === 'NONE' ? (
                 <p className="text-sm text-destructive">
-                    Token di server milik perangkat lain (kemungkinan laptop menimpa HP). Klik Daftar Ulang Notifikasi di HP ini, lalu jangan daftar ulang lagi di laptop.
+                    CURRENT DEVICE IS NOT REGISTERED. Daftar Notifikasi di perangkat ini. Tombol Test Current Device dinonaktifkan.
                 </p>
             ) : null}
 
-            {!multiDeviceReady ? (
-                <p className="text-xs text-muted-foreground">
-                    Arsitektur saat ini: satu kolom users.device_token per user. HP dan laptop saling menimpa sampai migrasi user_push_subscriptions dijalankan di production.
+            {deviceMatch === 'MISMATCHED' || deviceMatch === 'NOT ON THIS DEVICE' ? (
+                <p className="text-sm text-destructive">
+                    Perangkat ini belum MATCHED ke server. Daftar Notifikasi di HP ini. Login laptop tidak boleh menimpa token HP.
                 </p>
             ) : null}
+
+            <p className="text-xs text-muted-foreground">
+                Multi-device: setiap browser menyimpan token sendiri. Tabel user_push_subscriptions{' '}
+                {multiDeviceTable ? 'sudah ada di database.' : 'belum dimigrasi; token disimpan di storage private sampai migrasi disetujui.'}
+            </p>
 
             {localError ? <p className="text-sm text-destructive">{localError}</p> : null}
 
             {pushTest ? (
                 <p className="text-sm">
-                    Test: {pushTest.delivery || pushTest.reason} · found {pushTest.subscriptions_found}, sent {pushTest.subscriptions_sent}, failed{' '}
-                    {pushTest.subscriptions_failed}
+                    Test {pushTest.mode}: {pushTest.delivery || pushTest.reason}
+                    {pushTest.trace_id ? ` · trace ${pushTest.trace_id}` : ''} · found {pushTest.subscriptions_found}, sent{' '}
+                    {pushTest.subscriptions_sent}, failed {pushTest.subscriptions_failed}
                     {pushTest.device_match ? ` · device ${pushTest.device_match}` : ''}
-                    {pushTest.message_id ? ` · ${pushTest.message_id}` : ''}
-                    {pushTest.fcm_project_id ? ` · FCM ${pushTest.fcm_project_id}` : ''}
-                    {lastDisplay ? ` · display ${lastDisplay}` : ' · display DISPLAY_PENDING'}
+                    {pushTest.browser_received ? ' · BROWSER_RECEIVED' : ''}
+                    {pushTest.display_requested ? ' · DISPLAY_REQUESTED' : lastDisplay ? ` · display ${lastDisplay}` : ' · DISPLAY_PENDING'}
                 </p>
             ) : null}
 
@@ -344,8 +402,15 @@ export default function PushNotificationPanel() {
                     </Button>
                 ) : null}
 
-                <Button variant="secondary" onClick={sendTest} disabled={busy || !serverRegistered}>
-                    Test Kirim Notifikasi
+                <Button
+                    variant="secondary"
+                    onClick={() => sendTest('current')}
+                    disabled={busy || localRegistration !== 'PRESENT'}
+                >
+                    Test Current Device
+                </Button>
+                <Button variant="secondary" onClick={() => sendTest('all')} disabled={busy || !serverRegistered}>
+                    Test All My Devices
                 </Button>
 
                 {serverRegistered ? (

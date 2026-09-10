@@ -43,10 +43,30 @@ class HistoryJadwalObatPasien extends Model
         return $this->belongsTo(Pasien::class, 'pasien_id');
     }
 
-    public function hasBeenNotified(): bool
+    public function hasBeenNotified(?int $userId = null): bool
     {
         $sent = $this->notifikasi_dikirim;
+        if (! is_array($sent) || $sent === []) {
+            return false;
+        }
 
-        return is_array($sent) && count($sent) > 0;
+        $userEntries = [];
+        $legacyOnly = true;
+        foreach ($sent as $entry) {
+            if (is_array($entry) && isset($entry['user_id'])) {
+                $legacyOnly = false;
+                $userEntries[] = (int) $entry['user_id'];
+            }
+        }
+
+        if ($userId === null) {
+            return true;
+        }
+
+        if (in_array($userId, $userEntries, true)) {
+            return true;
+        }
+
+        return $legacyOnly;
     }
 }

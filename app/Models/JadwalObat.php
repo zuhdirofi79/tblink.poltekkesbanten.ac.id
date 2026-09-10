@@ -19,6 +19,10 @@ class JadwalObat extends Model
         'qty_diberikan',
         'satuan',
     ];
+    protected $casts = [
+        'mulai_tanggal' => 'date',
+        'selesai_tanggal' => 'date',
+    ];
     /**
      * Get all of the details for the JadwalObat
      *

@@ -7,6 +7,7 @@ use App\Services\FcmPushService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class SendNotifMinumObatCmd extends Command
 {
@@ -17,100 +18,153 @@ class SendNotifMinumObatCmd extends Command
     public function handle(FcmPushService $push): int
     {
         $now = now();
-        $schedules = HistoryJadwalObatPasien::query()
+        $timezone = (string) config('app.timezone');
+
+        $candidates = HistoryJadwalObatPasien::query()
             ->with(['pasien.user', 'pasien.pendamping', 'pasien.puskesmas', 'obat'])
             ->where('sudah_minum', false)
             ->where('waktu', '<=', $now)
             ->where('waktu', '>=', $now->copy()->subMinutes(30))
             ->get();
 
+        Log::info('[REMINDER_SCAN]', [
+            'now' => $now->toDateTimeString(),
+            'timezone' => $timezone,
+            'candidates' => $candidates->count(),
+        ]);
+
         $processed = 0;
         $sent = 0;
         $skipped = 0;
+        $eligible = 0;
 
-        foreach ($schedules as $sch) {
+        foreach ($candidates as $sch) {
             $processed++;
+            $traceId = (string) Str::uuid();
 
-            if ($sch->hasBeenNotified()) {
-                $skipped++;
-                continue;
-            }
+            try {
+                $pasien = $sch->pasien;
+                if (! $pasien) {
+                    Log::warning('[REMINDER_ITEM]', [
+                        'trace_id' => $traceId,
+                        'history_id' => $sch->id,
+                        'status' => 'pasien_missing',
+                    ]);
+                    $skipped++;
+                    continue;
+                }
 
-            $pasien = $sch->pasien;
-            if (! $pasien) {
-                Log::warning('[PUSH REMINDER] Skip: pasien missing', [
-                    'jadwal_id' => $sch->id,
-                ]);
-                $skipped++;
-                continue;
-            }
+                $obatNama = $sch->obat?->nama_obat ?: 'obat';
+                $jam = Carbon::parse($sch->waktu)->timezone($timezone)->format('H:i');
+                $title = 'Pengingat Minum Obat '.$obatNama;
+                $body = "{$obatNama} pukul {$jam} belum ditandai sudah diminum.";
+                $url = route('dashboard');
 
-            $obatNama = $sch->obat?->nama_obat ?: 'obat';
-            $jam = Carbon::parse($sch->waktu)->timezone(config('app.timezone'))->format('H:i');
-            $puskesmas = $pasien->puskesmas?->nama_puskesmas;
-            $title = 'Pengingat Minum Obat '.$obatNama;
-            $body = $puskesmas
-                ? "Obat {$obatNama} jam {$jam} belum diminum - {$puskesmas}"
-                : "Obat {$obatNama} jam {$jam} belum diminum.";
-            $url = route('dashboard');
+                $targets = [];
+                $pasienUser = $pasien->user;
+                if ($pasienUser) {
+                    $targets[$pasienUser->id] = $pasienUser;
+                }
+                $pendamping = $pasien->pendamping;
+                if ($pendamping) {
+                    $targets[$pendamping->id] = $pendamping;
+                }
 
-            $targets = [];
-            $pasienUser = $pasien->user;
-            if ($pasienUser) {
-                $targets[$pasienUser->id] = $pasienUser;
-            } else {
-                Log::warning('[PUSH REMINDER] No pasien user', [
-                    'pasien_id' => $pasien->id,
-                    'jadwal_id' => $sch->id,
-                ]);
-            }
+                if ($targets === []) {
+                    $skipped++;
+                    continue;
+                }
 
-            $pendamping = $pasien->pendamping;
-            if ($pendamping) {
-                $targets[$pendamping->id] = $pendamping;
-            }
+                $successCount = 0;
+                $foundAny = false;
+                $attempted = 0;
 
-            if ($targets === []) {
-                $skipped++;
-                continue;
-            }
+                foreach ($targets as $userId => $targetUser) {
+                    if ($sch->hasBeenNotified((int) $userId)) {
+                        Log::info('[REMINDER_ITEM]', [
+                            'trace_id' => $traceId,
+                            'history_id' => $sch->id,
+                            'user_id' => $userId,
+                            'scheduled_at' => optional($sch->waktu)->toDateTimeString(),
+                            'status' => 'already_notified',
+                            'already_notified' => true,
+                        ]);
+                        $skipped++;
+                        continue;
+                    }
 
-            $successCount = 0;
-            $foundAny = false;
-            foreach ($targets as $userId => $targetUser) {
-                $result = $push->sendToUser($targetUser, $title, $body, $url, $sch->id);
-                $foundAny = $foundAny || ($result['subscriptions_found'] ?? 0) > 0;
-                if ($result['success']) {
-                    $successCount += (int) ($result['subscriptions_sent'] ?? 0);
-                    $sent += (int) ($result['subscriptions_sent'] ?? 0);
-                } else {
-                    Log::warning('[PUSH REMINDER] Send failed', [
-                        'pasien_id' => $pasien->id,
+                    $attempted++;
+                    $eligible++;
+                    $subCount = count($push->tokensForUser($targetUser));
+                    Log::info('[MED_SCHEDULE_DUE]', [
+                        'trace_id' => $traceId,
+                        'history_id' => $sch->id,
                         'user_id' => $userId,
-                        'jadwal_id' => $sch->id,
-                        'reason' => $result['reason'],
-                        'http_status' => $result['status'],
-                        'token_fingerprint' => $result['token_fingerprint'] ?? null,
+                        'scheduled_at' => optional($sch->waktu)->toDateTimeString(),
+                        'status' => 'eligible',
+                        'already_notified' => false,
+                        'push_subscription_count' => $subCount,
+                    ]);
+
+                    $result = $push->sendToUser(
+                        $targetUser,
+                        $title,
+                        $body,
+                        $url,
+                        $sch->id,
+                        $traceId,
+                        'medication_reminder',
+                    );
+                    $foundAny = $foundAny || ($result['subscriptions_found'] ?? 0) > 0;
+                    if ($result['success']) {
+                        $successCount += (int) ($result['subscriptions_sent'] ?? 0);
+                        $sent += (int) ($result['subscriptions_sent'] ?? 0);
+                    } else {
+                        Log::warning('[REMINDER] Send failed', [
+                            'trace_id' => $traceId,
+                            'history_id' => $sch->id,
+                            'user_id' => $userId,
+                            'reason' => $result['reason'],
+                            'http_status' => $result['status'],
+                            'token_fingerprint' => $result['token_fingerprint'] ?? null,
+                        ]);
+                    }
+                }
+
+                if ($attempted > 0 && ! $foundAny) {
+                    Log::warning('[REMINDER] No active web push subscription', [
+                        'trace_id' => $traceId,
+                        'history_id' => $sch->id,
+                        'pasien_id' => $pasien->id,
+                        'user_id' => $pasienUser?->id,
                     ]);
                 }
-            }
 
-            if (! $foundAny) {
-                Log::warning('[PUSH REMINDER] No active web push subscription for user', [
-                    'pasien_id' => $pasien->id,
-                    'user_id' => $pasienUser?->id,
-                    'jadwal_id' => $sch->id,
+                Log::info('[REMINDER]', [
+                    'trace_id' => $traceId,
+                    'history_id' => $sch->id,
+                    'sent_count' => $successCount,
+                ]);
+            } catch (\Throwable $e) {
+                $skipped++;
+                Log::error('[REMINDER_ITEM] exception', [
+                    'trace_id' => $traceId,
+                    'history_id' => $sch->id,
+                    'exception' => $e::class,
+                    'message' => $e->getMessage(),
                 ]);
             }
-
-            Log::info('[PUSH REMINDER]', [
-                'pasien_id' => $pasien->id,
-                'jadwal_id' => $sch->id,
-                'obat' => $obatNama,
-                'scheduled_at' => optional($sch->waktu)->toDateTimeString(),
-                'sent_count' => $successCount,
-            ]);
         }
+
+        Log::info('[REMINDER_SCAN]', [
+            'now' => $now->toDateTimeString(),
+            'timezone' => $timezone,
+            'candidates' => $candidates->count(),
+            'eligible' => $eligible,
+            'processed' => $processed,
+            'sent' => $sent,
+            'skipped' => $skipped,
+        ]);
 
         $this->info("Processed {$processed}, sent {$sent}, skipped {$skipped}");
 

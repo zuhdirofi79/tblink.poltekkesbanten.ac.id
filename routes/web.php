@@ -17,8 +17,7 @@ Route::get('/', function () {
     return redirect('dashboard');
 })->name('home');
 
-Route::get('/firebase-sw-config.js', \App\Http\Controllers\FirebaseSwConfigController::class)
-    ->name('firebase.sw-config');
+Route::get('/push/ack', \App\Http\Controllers\PushAckController::class)->name('push.ack');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('dashboard', function () {

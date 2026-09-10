@@ -38,8 +38,13 @@ export function parseFcmPayload(payload) {
     const badge = data.badge || '/menkes192.png';
     const tag = data.tag || notif.tag || 'controltb-reminder';
     const url = data.url || data.link || '/dashboard';
+    const traceId = data.push_trace_id || '';
+    const type = data.type || '';
+    const historyId = data.history_id || '';
+    const ackReceived = data.ack_received || '';
+    const ackDisplayed = data.ack_displayed || '';
 
-    return { title, body, icon, badge, tag, url };
+    return { title, body, icon, badge, tag, url, traceId, type, historyId, ackReceived, ackDisplayed };
 }
 
 export async function hashToken(token) {
@@ -72,7 +77,7 @@ export async function getPushRegistration() {
 
 async function displaySystemNotification(payload) {
     const parsed = parseFcmPayload(payload);
-    console.info('[FCM] showNotification requested', { title: parsed.title, tag: parsed.tag });
+    console.info('[FCM] showNotification requested', { title: parsed.title, tag: parsed.tag, trace_id: parsed.traceId });
 
     if (Notification.permission !== 'granted') {
         throw new Error('Notification permission is not granted');
@@ -91,10 +96,22 @@ async function displaySystemNotification(payload) {
         renotify: true,
         data: {
             url: parsed.url,
+            push_trace_id: parsed.traceId,
         },
     });
 
-    console.info('[FCM] showNotification success');
+    console.info('[FCM] showNotification success', { trace_id: parsed.traceId });
+    if (parsed.ackDisplayed) {
+        fetch(parsed.ackDisplayed, { keepalive: true }).catch(() => {});
+    }
+    try {
+        localStorage.setItem(
+            'controltb_last_foreground_display',
+            JSON.stringify({ at: Date.now(), traceId: parsed.traceId, status: 'DISPLAY_REQUESTED' }),
+        );
+    } catch {
+        // ignore quota
+    }
     window.dispatchEvent(
         new CustomEvent('controltb-fcm-display', {
             detail: { status: 'DISPLAY_REQUESTED', ...parsed, at: Date.now() },
@@ -107,6 +124,17 @@ async function displaySystemNotification(payload) {
 async function handleForegroundMessage(payload) {
     console.info('[FCM] foreground message received');
     const parsed = parseFcmPayload(payload);
+    if (parsed.ackReceived) {
+        fetch(parsed.ackReceived, { keepalive: true }).catch(() => {});
+    }
+    try {
+        localStorage.setItem(
+            'controltb_last_foreground',
+            JSON.stringify({ at: Date.now(), traceId: parsed.traceId, title: parsed.title }),
+        );
+    } catch {
+        // ignore quota
+    }
     window.dispatchEvent(
         new CustomEvent('controltb-fcm-foreground', {
             detail: { ...parsed, at: Date.now() },
@@ -117,9 +145,17 @@ async function handleForegroundMessage(payload) {
         await displaySystemNotification(payload);
     } catch (error) {
         console.error('[FCM] showNotification error', error);
+        try {
+            localStorage.setItem(
+                'controltb_last_foreground_error',
+                JSON.stringify({ at: Date.now(), error: error?.message || String(error), traceId: parsed.traceId }),
+            );
+        } catch {
+            // ignore
+        }
         window.dispatchEvent(
             new CustomEvent('controltb-fcm-display', {
-                detail: { status: 'DISPLAY_FAILED', error: error?.message || String(error), at: Date.now() },
+                detail: { status: 'DISPLAY_FAILED', error: error?.message || String(error), at: Date.now(), traceId: parsed.traceId },
             }),
         );
     }

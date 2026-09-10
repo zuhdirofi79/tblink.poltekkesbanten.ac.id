@@ -3,13 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\HistoryJadwalObatPasien;
-use App\Models\JadwalObat;
 use App\Models\JadwalVisit;
 use App\Models\Obat;
 use App\Models\ObatPasien;
 use App\Models\Pasien;
 use App\Models\TypeTb;
 use App\Models\User;
+use App\Services\MedicationScheduleGenerator;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -231,7 +231,8 @@ class PasienController extends Controller
             abort(403);
         }
         $obatPasien = $pasien->obats()->with(['obat', 'jadwal'])->get();
-        $obatHariIni = HistoryJadwalObatPasien::where('pasien_id', $pasien->id)->with('obat')->whereDate('waktu', now()->format('Y-m-d'))->orderBy('waktu')->get();
+        $today = now()->timezone((string) config('app.timezone'))->toDateString();
+        $obatHariIni = HistoryJadwalObatPasien::where('pasien_id', $pasien->id)->with('obat')->whereDate('waktu', $today)->orderBy('waktu')->get();
         return inertia('pasien/obat/index', compact('pasien', 'obatPasien', 'obatHariIni'));
     }
     public function obatGenerate(Pasien $pasien)
@@ -240,8 +241,7 @@ class PasienController extends Controller
         if ($puskesmas->id != $pasien->puskesmas_id) {
             abort(403);
         }
-        $jos = JadwalObat::where('mulai_tanggal', '<=', date('Y-m-d'))->where('selesai_tanggal', '>=', date('Y-m-d'))->where('pasien_id', $pasien->id)->get();
-        $this->generateJadwalMinumObat($jos);
+        app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
         return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal obat berhasil di generate!');
     }
     public function deleteHistJadwalObat(HistoryJadwalObatPasien $historyJadwalObatPasien)
@@ -275,8 +275,8 @@ class PasienController extends Controller
             'selesai_tanggal' => 'required|date',
             'qty_diberikan' => 'required',
             'satuan' => 'required',
-            'jadwal_obat' => 'required|array',
-            'jadwal_obat.*.waktu' => 'required|date_format:H:i',
+            'jadwal_obat' => 'required|array|min:1',
+            'jadwal_obat.*.waktu' => ['required', 'regex:/^\d{2}:\d{2}(:\d{2})?$/'],
             'jadwal_obat.*.dosis' => 'required|numeric|min:0.1',
         ]);
         $op = ObatPasien::create([
@@ -299,6 +299,8 @@ class PasienController extends Controller
                 'satuan' => $j['satuan'],
             ]);
         }
+        app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
+
         return redirect(route('pasien.obat.index', $pasien->id))->with('success', 'Obat berhasil ditambahkan!');
     }
 
@@ -324,8 +326,8 @@ class PasienController extends Controller
             'selesai_tanggal' => 'required|date',
             'qty_diberikan' => 'required',
             'satuan' => 'required',
-            'jadwal_obat' => 'required|array',
-            'jadwal_obat.*.waktu' => 'required',
+            'jadwal_obat' => 'required|array|min:1',
+            'jadwal_obat.*.waktu' => ['required', 'regex:/^\d{2}:\d{2}(:\d{2})?$/'],
             'jadwal_obat.*.dosis' => 'required|numeric|min:0.1',
         ]);
         $obatPasien->jadwal()->update([
@@ -342,6 +344,8 @@ class PasienController extends Controller
                 'satuan' => $j['satuan'],
             ]);
         }
+        app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
+
         return redirect(route('pasien.obat.index', $pasien->id))->with('success', 'Obat berhasil diubah!');
     }
     #endregion
@@ -389,27 +393,6 @@ class PasienController extends Controller
         $countUser = $userRows + $addRow + 1;
 
         return ($countUser > 0) ? "{$username}{$countUser}" : $username;
-    }
-    public function generateJadwalMinumObat($jos)
-    {
-        foreach ($jos as $j) {
-            foreach ($j->details as $d) {
-                $waktu = Carbon::create(date('Y-m-d') . ' ' . $d->waktu);
-                $sch = HistoryJadwalObatPasien::where(['pasien_id' => $j->pasien_id, 'obat_id' => $j->obat_id, 'detail_jadwal_obat_id' => $d->id, 'waktu' => $waktu])->first();
-                if ($sch) {
-                    continue;
-                } else {
-                    $sch = HistoryJadwalObatPasien::create([
-                        'pasien_id' => $j->pasien_id,
-                        'obat_id' => $j->obat_id,
-                        'detail_jadwal_obat_id' => $d->id,
-                        'waktu' => $waktu,
-                        'dosis' => $d->dosis,
-                        'satuan' => $d->satuan
-                    ]);
-                }
-            }
-        }
     }
     public function send_notif(Request $r, Pasien $pasien, \App\Services\FcmPushService $push)
     {

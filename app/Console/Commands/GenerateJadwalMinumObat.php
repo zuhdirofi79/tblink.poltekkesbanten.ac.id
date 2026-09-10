@@ -2,55 +2,27 @@
 
 namespace App\Console\Commands;
 
-use App\Models\HistoryJadwalObatPasien;
-use App\Models\JadwalObat;
-use App\Models\ObatPasien;
-use Carbon\Carbon;
+use App\Services\MedicationScheduleGenerator;
 use Illuminate\Console\Command;
 
 class GenerateJadwalMinumObat extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
     protected $signature = 'app:generate-jadwal-minum-obat';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
-    protected $description = 'Generate jadwal minum obat harian';
+    protected $description = 'Generate jadwal minum obat harian dari JadwalObat yang berlaku hari ini';
 
-    /**
-     * Execute the console command.
-     */
-    public function handle()
+    public function handle(MedicationScheduleGenerator $generator): int
     {
-        $this->line('Generating...');
-        $jos = JadwalObat::where('mulai_tanggal', '<=', date('Y-m-d'))->where('selesai_tanggal', '>=', date('Y-m-d'))->get();
-        $bar = $this->output->createProgressBar(count($jos));
-        foreach ($jos as $j) {
-            $bar->advance();
-            foreach ($j->details as $d) {
-                $waktu = Carbon::create(date('Y-m-d') . ' ' . $d->waktu);
-                $sch = HistoryJadwalObatPasien::where(['pasien_id' => $j->pasien_id, 'obat_id' => $j->obat_id, 'detail_jadwal_obat_id' => $d->id, 'waktu' => $waktu])->first();
-                if ($sch) {
-                    continue;
-                } else {
-                    $sch = HistoryJadwalObatPasien::create([
-                        'pasien_id' => $j->pasien_id,
-                        'obat_id' => $j->obat_id,
-                        'detail_jadwal_obat_id' => $d->id,
-                        'waktu' => $waktu,
-                        'dosis' => $d->dosis,
-                        'satuan' => $d->satuan
-                    ]);
-                }
-            }
-        }
-        $bar->finish();
+        $stats = $generator->generateForDate();
+
+        $this->info('Date: '.$stats['date'].' ('.$stats['timezone'].')');
+        $this->info('Eligible schedules: '.$stats['master_eligible'].' / '.$stats['master_total']);
+        $this->info('Details: '.$stats['details_total']);
+        $this->info('Existing: '.$stats['history_existing']);
+        $this->info('Created: '.$stats['history_created']);
+        $this->info('Skipped: '.$stats['skipped']);
+        $this->info('Errors: '.$stats['errors']);
+
+        return self::SUCCESS;
     }
 }

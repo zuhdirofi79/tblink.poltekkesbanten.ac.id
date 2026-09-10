@@ -138,54 +138,91 @@ class UserController extends Controller
 
     public function send_test_notif(Request $r, FcmPushService $push)
     {
-        $user = $r->user();
-        $clientHash = strtolower(trim((string) $r->input('token_hash', '')));
-        $serverHash = $push->tokenHash($user->device_token);
-        $matched = $clientHash !== '' && $serverHash !== null && hash_equals($serverHash, $clientHash);
+        $r->validate([
+            'token_hash' => 'nullable|string|max:64',
+            'mode' => 'nullable|in:current,all',
+        ]);
 
-        $send = $push->sendToUser(
-            $user,
-            'Test Notifikasi Control TB',
-            'Web Push Control TB berhasil diterima.',
-            route('dashboard'),
-        );
+        $user = $r->user();
+        $mode = $r->input('mode', 'current');
+        $clientHash = strtolower(trim((string) $r->input('token_hash', '')));
+        $serverHashes = $push->tokenHashesForUser($user);
+        $matched = $clientHash !== '' && in_array($clientHash, $serverHashes, true);
+        $traceId = (string) \Illuminate\Support\Str::uuid();
+
+        if ($mode === 'current') {
+            if ($clientHash === '') {
+                $send = [
+                    'success' => false,
+                    'reason' => 'CURRENT_DEVICE_NOT_REGISTERED',
+                    'delivery' => 'CURRENT_DEVICE_NOT_REGISTERED',
+                    'subscriptions_found' => 0,
+                    'subscriptions_sent' => 0,
+                    'subscriptions_failed' => 0,
+                    'trace_id' => $traceId,
+                    'message_id' => null,
+                    'token_fingerprint' => null,
+                ];
+            } else {
+                $send = $push->sendToHash(
+                    $user,
+                    $clientHash,
+                    'Test Notifikasi Control TB',
+                    'Web Push Control TB berhasil diterima.',
+                    route('dashboard'),
+                    0,
+                    $traceId,
+                    'test_current_device',
+                );
+            }
+        } else {
+            $send = $push->sendToUser(
+                $user,
+                'Test Notifikasi Control TB',
+                'Web Push Control TB berhasil diterima.',
+                route('dashboard'),
+                0,
+                $traceId,
+                'test_all_devices',
+            );
+        }
 
         $found = (int) ($send['subscriptions_found'] ?? 0);
         $sent = (int) ($send['subscriptions_sent'] ?? 0);
         $failed = (int) ($send['subscriptions_failed'] ?? 0);
 
-        if ($found === 0) {
-            $send['reason'] = 'No active web push subscription for user '.$user->id;
-            Log::warning('[PUSH TEST] '.$send['reason'], ['user_id' => $user->id, 'subscription_count' => 0]);
-        } else {
-            Log::info('[PUSH TEST]', [
-                'user_id' => $user->id,
-                'subscription_count' => $found,
-                'success_count' => $sent,
-                'failed_count' => $failed,
-                'reason' => $send['reason'],
-                'http_status' => $send['status'],
-                'fcm_project_id' => $push->projectId(),
-                'credential_project_id' => $push->credentialProjectId(),
-                'message_id' => $send['message_id'] ?? null,
-                'token_fingerprint' => $send['token_fingerprint'] ?? null,
-                'device_match' => $matched ? 'MATCHED' : 'MISMATCHED',
-            ]);
-        }
+        Log::info('[PUSH TEST]', [
+            'user_id' => $user->id,
+            'mode' => $mode,
+            'trace_id' => $send['trace_id'] ?? $traceId,
+            'subscription_count' => $found,
+            'success_count' => $sent,
+            'failed_count' => $failed,
+            'reason' => $send['reason'] ?? null,
+            'http_status' => $send['status'] ?? null,
+            'fcm_project_id' => $push->projectId(),
+            'message_id' => $send['message_id'] ?? null,
+            'token_fingerprint' => $send['token_fingerprint'] ?? null,
+            'device_match' => $matched ? 'MATCHED' : 'MISMATCHED',
+        ]);
 
         $result = [
-            'success' => (bool) $send['success'],
+            'success' => (bool) ($send['success'] ?? false),
             'subscriptions_found' => $found,
             'subscriptions_sent' => $sent,
             'subscriptions_failed' => $failed,
-            'reason' => $send['reason'],
-            'delivery' => $send['delivery'] ?? $send['reason'],
+            'reason' => $send['reason'] ?? null,
+            'delivery' => $send['delivery'] ?? $send['reason'] ?? null,
             'display' => 'DISPLAY_PENDING',
+            'browser_received' => $push->ackStage($send['trace_id'] ?? $traceId, 'browser_received'),
+            'display_requested' => $push->ackStage($send['trace_id'] ?? $traceId, 'display_requested'),
             'fcm_project_id' => $push->projectId(),
             'credential_project_id' => $push->credentialProjectId(),
             'message_id' => $send['message_id'] ?? null,
             'token_fingerprint' => $send['token_fingerprint'] ?? null,
             'device_match' => $matched ? 'MATCHED' : 'MISMATCHED',
+            'trace_id' => $send['trace_id'] ?? $traceId,
+            'mode' => $mode,
         ];
 
         if ($r->wantsJson()) {
@@ -194,7 +231,7 @@ class UserController extends Controller
 
         $flashKey = $result['success'] ? 'success' : 'error';
         $flashMessage = $result['success']
-            ? 'FCM_ACCEPTED. Bukan jaminan notifikasi sudah tampil. Cek notification bar (foreground: onMessage, background: service worker).'
+            ? 'FCM_ACCEPTED (trace '.$result['trace_id'].'). Bukan jaminan notification bar. Tunggu BROWSER_RECEIVED / DISPLAY_REQUESTED.'
             : 'Test Web Push gagal: '.$result['reason'];
 
         return redirect()->back()->with($flashKey, $flashMessage)->with('push_test', $result);

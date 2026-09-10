@@ -16,6 +16,12 @@ class JadwalVisit extends Model
         'keluhan',
         'catatan',
         'active',
+        'notification_sent_at',
+    ];
+    protected $casts = [
+        'tgl_visit' => 'datetime',
+        'active' => 'boolean',
+        'notification_sent_at' => 'datetime',
     ];
     protected $attributes = [
         'catatan' => '-',
