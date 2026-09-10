@@ -6,6 +6,10 @@ use Illuminate\Database\Eloquent\Model;
 
 class HistoryJadwalObatPasien extends Model
 {
+    public const SOURCE_SCHEDULE = 'schedule';
+
+    public const SOURCE_MANUAL_TEST = 'manual_notification_test';
+
     protected $fillable = [
         'pasien_id',
         'obat_id',
@@ -16,6 +20,7 @@ class HistoryJadwalObatPasien extends Model
         'sudah_minum',
         'waktu_aktual_minum',
         'notifikasi_dikirim',
+        'source',
     ];
     protected $casts = [
         'notifikasi_dikirim' => 'array',
@@ -26,7 +31,22 @@ class HistoryJadwalObatPasien extends Model
     protected $attributes = [
         'sudah_minum' => false,
         'notifikasi_dikirim' => '[]',
+        'source' => self::SOURCE_SCHEDULE,
     ];
+
+    public function isManualTest(): bool
+    {
+        return $this->source === self::SOURCE_MANUAL_TEST;
+    }
+
+    public function scopeClinical($query)
+    {
+        return $query->where(function ($q) {
+            $q->whereNull('source')
+                ->orWhere('source', '')
+                ->orWhere('source', self::SOURCE_SCHEDULE);
+        });
+    }
 
     public function obat()
     {

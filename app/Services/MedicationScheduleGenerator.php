@@ -76,7 +76,7 @@ class MedicationScheduleGenerator
             }
         }
 
-        $this->diag->info('MED_GENERATOR_RESULT', [
+        $this->diag->info('MED_SCHEDULE_SCAN', [
             'date' => $today,
             'timezone' => $timezone,
             'eligible' => $stats['master_eligible'],
@@ -130,6 +130,7 @@ class MedicationScheduleGenerator
             return;
         }
 
+        $validTimes = [];
         foreach ($details as $detail) {
             $stats['details_total']++;
             $scheduledAt = $this->scheduledAt($today, $detail->waktu, $timezone);
@@ -144,7 +145,10 @@ class MedicationScheduleGenerator
                 continue;
             }
 
+            $validTimes[] = $scheduledAt->format('Y-m-d H:i:s');
+
             $existing = HistoryJadwalObatPasien::query()
+                ->clinical()
                 ->where('pasien_id', $jadwal->pasien_id)
                 ->where('obat_id', $jadwal->obat_id)
                 ->where('waktu', $scheduledAt->format('Y-m-d H:i:s'))
@@ -171,6 +175,33 @@ class MedicationScheduleGenerator
             ]);
             $stats['history_created']++;
         }
+
+        $this->forgetStaleUpcomingToday($jadwal, $today, $validTimes);
+    }
+
+    /**
+     * Drop today's still-upcoming untaken rows whose time is no longer on the master schedule.
+     * Past occurrences (missed or taken) are left untouched.
+     *
+     * @param  list<string>  $validTimes
+     */
+    private function forgetStaleUpcomingToday(JadwalObat $jadwal, string $today, array $validTimes): void
+    {
+        $query = HistoryJadwalObatPasien::query()
+            ->clinical()
+            ->where('pasien_id', $jadwal->pasien_id)
+            ->where('obat_id', $jadwal->obat_id)
+            ->whereDate('waktu', $today)
+            ->where(function ($q) {
+                $q->where('sudah_minum', false)->orWhereNull('sudah_minum');
+            })
+            ->where('waktu', '>', now());
+
+        if ($validTimes !== []) {
+            $query->whereNotIn('waktu', $validTimes);
+        }
+
+        $query->delete();
     }
 
     public function scheduledAt(string $date, mixed $waktu, ?string $timezone = null): ?Carbon

@@ -1,16 +1,45 @@
+import InputError from '@/components/input-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TableHead, Table, TableHeader, TableRow, TableBody, TableCell } from '@/components/ui/table'
 import AppLayout from '@/layouts/app-layout'
 import { Head, router, useForm } from '@inertiajs/react'
 import { Trash } from 'lucide-react'
 import moment from 'moment'
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
+
+const TEST_SOURCE = 'manual_notification_test'
+
+function isTestRow(ops) {
+    return ops?.source === TEST_SOURCE
+}
+
+function isNotified(ops) {
+    const sent = ops?.notifikasi_dikirim
+    return Array.isArray(sent) && sent.length > 0
+}
+
+function canCancelTest(ops) {
+    return isTestRow(ops) && !isNotified(ops) && moment(ops.waktu).isAfter(moment())
+}
+
+function defaultTestTime() {
+    return moment().add(3, 'minutes').format('HH:mm')
+}
 
 export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
     const [delData, setDelData] = useState()
     const [delDialog, setDelDialog] = useState(false)
+    const [testOpen, setTestOpen] = useState(false)
+
+    const selectableObat = useMemo(
+        () => (obatPasien || []).filter((ops) => ops?.obat && ops?.jadwal?.details?.length),
+        [obatPasien],
+    )
 
     const closeDelDialog = () => {
         setDelDialog(false)
@@ -31,8 +60,46 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
     }
     const fDel = useForm()
     const delJadwal = (jo) => {
-        fDel.delete(route('pasien.hist.delete', jo.id))
+        fDel.delete(route('pasien.obat.hist.delete', jo.id))
     }
+    const fCancel = useForm()
+    const cancelTest = (ops) => {
+        fCancel.delete(route('pasien.obat.manual-reminder.cancel', [pasien.id, ops.id]))
+    }
+
+    const { data, setData, post, processing, errors, reset, clearErrors } = useForm({
+        obat_pasien_id: '',
+        waktu: defaultTestTime(),
+    })
+
+    const openTestModal = () => {
+        clearErrors()
+        reset()
+        const firstId = selectableObat[0]?.id ? String(selectableObat[0].id) : ''
+        setData({
+            obat_pasien_id: firstId,
+            waktu: defaultTestTime(),
+        })
+        setTestOpen(true)
+    }
+
+    const closeTestModal = () => {
+        setTestOpen(false)
+    }
+
+    const selectedObatPasien = selectableObat.find((ops) => String(ops.id) === String(data.obat_pasien_id))
+    const selectedNama = selectedObatPasien?.obat?.nama_obat || 'obat'
+    const selectedDetail = selectedObatPasien?.jadwal?.details?.[0]
+    const previewJam = data.waktu || '--:--'
+
+    const submitTest = (e) => {
+        e.preventDefault()
+        post(route('pasien.obat.manual-reminder', pasien.id), {
+            preserveScroll: true,
+            onSuccess: () => closeTestModal(),
+        })
+    }
+
     return (
         <AppLayout breadcrumbs={bc}>
             <Head title='Pengobatan Pasien' />
@@ -46,9 +113,16 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
                             <CardContent>
                                 <div className="grid md:flex gap-2 justify-between items-center">
                                     <CardTitle className={'text-primary uppercase'}>Jadwal Obat Hari Ini</CardTitle>
-                                    <div>
+                                    <div className='flex flex-wrap gap-2'>
                                         <Button onClick={generateJadwal} disabled={fGen.processing} >
                                             Generate
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            onClick={openTestModal}
+                                            disabled={!selectableObat.length}
+                                        >
+                                            + Jadwal Uji Notifikasi
                                         </Button>
                                     </div>
                                 </div>
@@ -67,18 +141,32 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
                                                 <TableRow key={ops.id}>
                                                     <TableCell className={'flex items-center justify-center gap-2'}>
                                                         {
-                                                            ops.sudah_minum ? '' :
-                                                                <Button size={'sm'} variant={'icon'} onClick={() => {
-                                                                    setDelData(ops)
-                                                                    setTimeout(() => setDelDialog(true), 100)
-                                                                }}>
-                                                                    <Trash className='text-destructive' />
+                                                            canCancelTest(ops) ?
+                                                                <Button
+                                                                    size={'sm'}
+                                                                    variant={'outline'}
+                                                                    disabled={fCancel.processing}
+                                                                    onClick={() => cancelTest(ops)}
+                                                                >
+                                                                    Batalkan Uji
                                                                 </Button>
+                                                                : (!ops.sudah_minum && !isTestRow(ops) ?
+                                                                    <Button size={'sm'} variant={'icon'} onClick={() => {
+                                                                        setDelData(ops)
+                                                                        setTimeout(() => setDelDialog(true), 100)
+                                                                    }}>
+                                                                        <Trash className='text-destructive' />
+                                                                    </Button>
+                                                                    : '')
                                                         }
                                                     </TableCell>
                                                     <TableCell>{ops.obat.nama_obat}</TableCell>
                                                     <TableCell>{moment(ops.waktu).format('HH:mm')}</TableCell>
-                                                    <TableCell>{ops.sudah_minum ? <span className='text-primary'>Sudah</span> : <span className='text-destructive animate-pulse'>Belum</span>}</TableCell>
+                                                    <TableCell>
+                                                        {isTestRow(ops)
+                                                            ? <span className='text-primary font-semibold'>UJI NOTIFIKASI{isNotified(ops) ? ' · Terkirim' : ''}</span>
+                                                            : (ops.sudah_minum ? <span className='text-primary'>Sudah</span> : <span className='text-destructive animate-pulse'>Belum</span>)}
+                                                    </TableCell>
                                                 </TableRow>
                                             ))
                                         }
@@ -138,6 +226,59 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
                     </Dialog>
                     : ''
             }
+            <Dialog open={testOpen} onOpenChange={(open) => open ? openTestModal() : closeTestModal()}>
+                <DialogContent>
+                    <form onSubmit={submitTest} className='grid gap-4'>
+                        <DialogHeader>
+                            <DialogTitle>Jadwal Uji Notifikasi</DialogTitle>
+                            <DialogDescription>
+                                Pasien: {pasien.nama}. Jadwal ini hanya untuk menguji pengiriman otomatis hari ini, bukan resep jangka panjang.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className='grid gap-2'>
+                            <Label>Obat</Label>
+                            <Select
+                                value={data.obat_pasien_id}
+                                onValueChange={(value) => setData('obat_pasien_id', value)}
+                            >
+                                <SelectTrigger>
+                                    <SelectValue placeholder="Pilih obat pasien" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {selectableObat.map((ops) => (
+                                        <SelectItem key={ops.id} value={String(ops.id)}>
+                                            {ops.obat.nama_obat}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <InputError message={errors.obat_pasien_id} />
+                        </div>
+                        <div className='grid gap-2'>
+                            <Label>Waktu hari ini</Label>
+                            <Input
+                                type='time'
+                                value={data.waktu}
+                                onChange={(e) => setData('waktu', e.target.value)}
+                            />
+                            <InputError message={errors.waktu} />
+                        </div>
+                        {selectedDetail ? (
+                            <div className='text-sm text-muted-foreground'>
+                                Dosis: {selectedDetail.dosis} {selectedDetail.satuan}
+                            </div>
+                        ) : null}
+                        <div className='rounded-md border p-3 text-sm'>
+                            <p className='font-semibold'>Pengingat Minum Obat {selectedNama}</p>
+                            <p className='text-muted-foreground'>{selectedNama} pukul {previewJam} belum ditandai sudah diminum.</p>
+                        </div>
+                        <div className='flex flex-wrap gap-2 justify-end'>
+                            <Button type='button' variant='outline' onClick={closeTestModal}>Batal</Button>
+                            <Button type='submit' disabled={processing || !selectableObat.length}>Buat Jadwal Uji</Button>
+                        </div>
+                    </form>
+                </DialogContent>
+            </Dialog>
         </AppLayout>
     )
 }

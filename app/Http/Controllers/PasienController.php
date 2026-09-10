@@ -10,6 +10,7 @@ use App\Models\Pasien;
 use App\Models\TypeTb;
 use App\Models\User;
 use App\Services\MedicationScheduleGenerator;
+use App\Services\ManualMedicationReminderService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -230,7 +231,7 @@ class PasienController extends Controller
         if ($puskesmas->id != $pasien->puskesmas_id) {
             abort(403);
         }
-        $obatPasien = $pasien->obats()->with(['obat', 'jadwal'])->get();
+        $obatPasien = $pasien->obats()->with(['obat', 'jadwal.details'])->get();
         $today = now()->timezone((string) config('app.timezone'))->toDateString();
         $obatHariIni = HistoryJadwalObatPasien::where('pasien_id', $pasien->id)->with('obat')->whereDate('waktu', $today)->orderBy('waktu')->get();
         return inertia('pasien/obat/index', compact('pasien', 'obatPasien', 'obatHariIni'));
@@ -243,6 +244,44 @@ class PasienController extends Controller
         }
         app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
         return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal obat berhasil di generate!');
+    }
+
+    public function storeManualReminder(Request $r, Pasien $pasien, ManualMedicationReminderService $manualReminder)
+    {
+        $puskesmas = auth()->user()->puskesmas;
+        if ($puskesmas->id != $pasien->puskesmas_id) {
+            abort(403);
+        }
+        $r->validate([
+            'obat_pasien_id' => 'required|integer',
+            'waktu' => ['required', 'regex:/^\d{2}:\d{2}(:\d{2})?$/'],
+        ]);
+
+        $history = $manualReminder->create(
+            $pasien,
+            (int) $r->obat_pasien_id,
+            (string) $r->waktu,
+            (int) auth()->id(),
+        );
+
+        $jam = optional($history->waktu)->timezone((string) config('app.timezone'))->format('H:i');
+
+        return redirect(route('pasien.obat.index', $pasien))->with(
+            'success',
+            'Jadwal uji notifikasi berhasil dibuat untuk pukul '.$jam.'.'
+        );
+    }
+
+    public function cancelManualReminder(Pasien $pasien, HistoryJadwalObatPasien $history, ManualMedicationReminderService $manualReminder)
+    {
+        $puskesmas = auth()->user()->puskesmas;
+        if ($puskesmas->id != $pasien->puskesmas_id || (int) $history->pasien_id !== (int) $pasien->id) {
+            abort(403);
+        }
+
+        $manualReminder->cancel($history);
+
+        return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal uji notifikasi dibatalkan.');
     }
     public function deleteHistJadwalObat(HistoryJadwalObatPasien $historyJadwalObatPasien)
     {

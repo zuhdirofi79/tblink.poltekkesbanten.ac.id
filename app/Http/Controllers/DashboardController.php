@@ -20,7 +20,7 @@ class DashboardController extends Controller
                 'pasien' => null,
             ];
         }
-        $jadwalHariIni = $pasien->historyJadwalObat()->whereBetween('waktu', [now()->startOfDay(), now()->endOfDay()])->with(['obat'])->orderBy('waktu')->get();
+        $jadwalHariIni = $pasien->historyJadwalObat()->clinical()->whereBetween('waktu', [now()->startOfDay(), now()->endOfDay()])->with(['obat'])->orderBy('waktu')->get();
         return [
             'schedules' => $jadwalHariIni,
             'pasien' => $pasien,
@@ -28,6 +28,14 @@ class DashboardController extends Controller
     }
     public function sudah_minum_obat(HistoryJadwalObatPasien $sch)
     {
+        $pasien = auth()->user()?->relatedPasien();
+        if (! $pasien || (int) $sch->pasien_id !== (int) $pasien->id) {
+            abort(403);
+        }
+        if ($sch->isManualTest()) {
+            abort(403);
+        }
+
         $sch->update([
             'waktu_aktual_minum' => now(),
             'sudah_minum' => true,
@@ -49,8 +57,8 @@ class DashboardController extends Controller
     {
         $psm = auth()->user()->puskesmas;
         $psns = Pasien::where('puskesmas_id', $psm->id)->pluck('id');
-        $sudah = HistoryJadwalObatPasien::whereIn('pasien_id', $psns)->where('waktu', '<=', now())->where('sudah_minum', 1)->count();
-        $belum = HistoryJadwalObatPasien::whereIn('pasien_id', $psns)->where('waktu', '<=', now())->where('sudah_minum', 0)->count();
+        $sudah = HistoryJadwalObatPasien::clinical()->whereIn('pasien_id', $psns)->where('waktu', '<=', now())->where('sudah_minum', 1)->count();
+        $belum = HistoryJadwalObatPasien::clinical()->whereIn('pasien_id', $psns)->where('waktu', '<=', now())->where('sudah_minum', 0)->count();
         if ($sudah > 0 && $belum > 0) {
             $sudahPersen = $sudah / ($sudah + $belum) * 100;
             $belumPersen = $belum / ($sudah + $belum) * 100;
@@ -74,7 +82,7 @@ class DashboardController extends Controller
     {
         $psm = auth()->user()->puskesmas;
         $psns = Pasien::where('puskesmas_id', $psm->id)->pluck('id');
-        $hists = HistoryJadwalObatPasien::whereBetween('waktu', [now()->subHour(2), now()->addHour(2)])->whereIn('pasien_id', $psns)->where('sudah_minum', 0)->with(['pasien.user', 'obat'])->get();
+        $hists = HistoryJadwalObatPasien::clinical()->whereBetween('waktu', [now()->subHour(2), now()->addHour(2)])->whereIn('pasien_id', $psns)->where('sudah_minum', 0)->with(['pasien.user', 'obat'])->get();
         Cache::put('belum_minum', $hists, now()->addHour(2));
         return $hists;
     }
@@ -98,8 +106,8 @@ class DashboardController extends Controller
     }
     public function ds_sa_kepatuhan()
     {
-        $sudah = HistoryJadwalObatPasien::where('waktu', '<=', now())->where('sudah_minum', 1)->count();
-        $belum = HistoryJadwalObatPasien::where('waktu', '<=', now())->where('sudah_minum', 0)->count();
+        $sudah = HistoryJadwalObatPasien::clinical()->where('waktu', '<=', now())->where('sudah_minum', 1)->count();
+        $belum = HistoryJadwalObatPasien::clinical()->where('waktu', '<=', now())->where('sudah_minum', 0)->count();
         if ($sudah > 0 && $belum > 0) {
             $sudahPersen = $sudah / ($sudah + $belum) * 100;
             $belumPersen = $belum / ($sudah + $belum) * 100;

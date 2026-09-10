@@ -130,6 +130,91 @@ test('generator skips schedules outside the date range', function () {
         ->and($stats['history_created'])->toBe(0);
 });
 
+test('generator skips expired schedules that ended before today', function () {
+    medicationFixture([
+        'mulai_tanggal' => now()->subDays(10)->toDateString(),
+        'selesai_tanggal' => now()->subDay()->toDateString(),
+    ]);
+
+    $stats = app(MedicationScheduleGenerator::class)->generateForDate();
+
+    expect($stats['master_eligible'])->toBe(0)
+        ->and($stats['history_created'])->toBe(0)
+        ->and(HistoryJadwalObatPasien::query()->count())->toBe(0);
+});
+
+test('changing upcoming medication time replaces today history without duplicating', function () {
+    $this->travelTo(now()->timezone(config('app.timezone'))->setTime(10, 0, 0));
+
+    $fixture = medicationFixture(['waktu' => '17:00:00']);
+    $generator = app(MedicationScheduleGenerator::class);
+
+    $generator->generateForDate();
+    expect(HistoryJadwalObatPasien::query()->count())->toBe(1)
+        ->and(HistoryJadwalObatPasien::first()->waktu->timezone(config('app.timezone'))->format('H:i'))->toBe('17:00');
+
+    $fixture['jadwal']->details()->delete();
+    $fixture['jadwal']->details()->create([
+        'waktu' => '18:00:00',
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+    ]);
+    $fixture['jadwal']->unsetRelation('details');
+
+    $second = $generator->generateForDate();
+
+    expect($second['history_created'])->toBe(1)
+        ->and(HistoryJadwalObatPasien::query()->count())->toBe(1);
+
+    $row = HistoryJadwalObatPasien::first();
+    expect($row->waktu->timezone(config('app.timezone'))->format('H:i'))->toBe('18:00');
+});
+
+test('changing time does not delete a past missed occurrence', function () {
+    $this->travelTo(now()->timezone(config('app.timezone'))->setTime(12, 0, 0));
+
+    $fixture = medicationFixture(['waktu' => '08:00:00']);
+    $generator = app(MedicationScheduleGenerator::class);
+    $generator->generateForDate();
+
+    $fixture['jadwal']->details()->delete();
+    $fixture['jadwal']->details()->create([
+        'waktu' => '18:00:00',
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+    ]);
+    $fixture['jadwal']->unsetRelation('details');
+    $generator->generateForDate();
+
+    $times = HistoryJadwalObatPasien::query()
+        ->get()
+        ->map(fn ($row) => $row->waktu->timezone(config('app.timezone'))->format('H:i'))
+        ->sort()
+        ->values()
+        ->all();
+
+    expect($times)->toBe(['08:00', '18:00']);
+});
+
+test('generator does not prune upcoming manual notification tests', function () {
+    $this->travelTo(now()->timezone(config('app.timezone'))->setTime(10, 0, 0));
+    $fixture = medicationFixture(['waktu' => '18:00:00']);
+    HistoryJadwalObatPasien::create([
+        'pasien_id' => $fixture['pasien']->id,
+        'obat_id' => $fixture['obat']->id,
+        'detail_jadwal_obat_id' => $fixture['jadwal']->details()->first()->id,
+        'waktu' => now()->timezone(config('app.timezone'))->setTime(17, 0, 0),
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+        'source' => HistoryJadwalObatPasien::SOURCE_MANUAL_TEST,
+    ]);
+
+    app(MedicationScheduleGenerator::class)->generateForDate();
+
+    expect(HistoryJadwalObatPasien::query()->where('source', HistoryJadwalObatPasien::SOURCE_MANUAL_TEST)->count())->toBe(1)
+        ->and(HistoryJadwalObatPasien::clinical()->count())->toBe(1);
+});
+
 test('history hasBeenNotified is tracked per user', function () {
     $history = new HistoryJadwalObatPasien([
         'notifikasi_dikirim' => [

@@ -36,8 +36,8 @@ class DataPasienExport implements FromView, ShouldAutoSize, WithStyles, WithColu
         foreach ($psns as $key =>  $psn) {
             $persen = 100;
             $lama_mdtb = round(abs(Carbon::parse($psn->tgl_diagnosa)->diffInMonths(now()))) . ' Bulan';
-            $diminum = HistoryJadwalObatPasien::where('pasien_id', $psn->id)->where('sudah_minum', 1)->count();
-            $persen = $diminum / (HistoryJadwalObatPasien::where('pasien_id', $psn->id)->count()) * 100;
+            $diminum = HistoryJadwalObatPasien::clinical()->where('pasien_id', $psn->id)->where('sudah_minum', 1)->count();
+            $persen = $diminum / (HistoryJadwalObatPasien::clinical()->where('pasien_id', $psn->id)->count()) * 100;
             $obats = [];
             foreach ($psn->obats as $obat) {
                 $obats[] = $obat->obat->nama_obat;

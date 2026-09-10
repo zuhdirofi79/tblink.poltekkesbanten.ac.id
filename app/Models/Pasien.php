@@ -59,8 +59,8 @@ class Pasien extends Model
     }
     public function kepatuhanMinumObat()
     {
-        $minum = HistoryJadwalObatPasien::where('pasien_id', $this->id)->where('waktu', '<=', now())->where('sudah_minum', true)->count();
-        $tdk_minum = HistoryJadwalObatPasien::where('pasien_id', $this->id)->where('waktu', '<=', now())->where('sudah_minum', false)->count();
+        $minum = HistoryJadwalObatPasien::clinical()->where('pasien_id', $this->id)->where('waktu', '<=', now())->where('sudah_minum', true)->count();
+        $tdk_minum = HistoryJadwalObatPasien::clinical()->where('pasien_id', $this->id)->where('waktu', '<=', now())->where('sudah_minum', false)->count();
         $percent = 0;
         try {
             $percent = $minum / ($minum + $tdk_minum) * 100;
