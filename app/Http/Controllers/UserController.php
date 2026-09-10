@@ -162,24 +162,17 @@ class UserController extends Controller
         $r->validate([
             'token_hash' => 'nullable|string|max:64',
             'mode' => 'nullable|in:current,all',
-            'payload_mode' => 'nullable|in:notification,data',
         ]);
 
         $user = $r->user();
         $mode = $r->input('mode', 'current');
-        $payloadMode = (string) $r->input('payload_mode', $mode === 'current' ? 'notification' : 'data');
         $clientHash = strtolower(trim((string) $r->input('token_hash', '')));
         $serverHashes = $push->tokenHashesForUser($user);
         $matched = $clientHash !== '' && in_array($clientHash, $serverHashes, true);
         $traceId = (string) \Illuminate\Support\Str::uuid();
         $testUrl = url('/pasien/notifikasi');
-        $title = $payloadMode === 'notification'
-            ? 'Control TB Push Test'
-            : 'Control TB Data Test';
-        $body = $payloadMode === 'notification'
-            ? 'FCM notification payload test'
-            : 'FCM data-only payload test';
-        $extra = ['_payload_mode' => $payloadMode];
+        $title = 'Control TB Push Test';
+        $body = 'Tes notifikasi perangkat ini.';
 
         if ($mode === 'current') {
             if ($clientHash === '') {
@@ -203,8 +196,7 @@ class UserController extends Controller
                     $testUrl,
                     0,
                     $traceId,
-                    $payloadMode === 'notification' ? 'test_mode_a_notification' : 'test_mode_b_data',
-                    $extra,
+                    'test_current_device',
                 );
             }
         } else {
@@ -216,7 +208,6 @@ class UserController extends Controller
                 0,
                 $traceId,
                 'test_all_devices',
-                $extra,
             );
         }
 
@@ -227,10 +218,7 @@ class UserController extends Controller
         app(\App\Services\PushDiagnosticLogger::class)->info('TEST_RESULT', [
             'push_trace_id' => $send['trace_id'] ?? $traceId,
             'target_user_id' => $user->id,
-            'notification_type' => $mode === 'current'
-                ? ($payloadMode === 'notification' ? 'test_mode_a_notification' : 'test_mode_b_data')
-                : 'test_all_devices',
-            'payload_mode' => $payloadMode,
+            'notification_type' => $mode === 'current' ? 'test_current_device' : 'test_all_devices',
             'subscription_count' => $found,
             'result' => $send['reason'] ?? null,
             'fcm_http_status' => $send['status'] ?? null,
@@ -246,14 +234,7 @@ class UserController extends Controller
             'subscriptions_failed' => $failed,
             'reason' => $send['reason'] ?? null,
             'delivery' => $send['delivery'] ?? $send['reason'] ?? null,
-            'display' => 'DISPLAY_PENDING',
-            'raw_push_received' => $push->ackStage($send['trace_id'] ?? $traceId, 'raw_push_received'),
-            'payload_parsed' => $push->ackStage($send['trace_id'] ?? $traceId, 'payload_parsed'),
-            'browser_received' => $push->ackStage($send['trace_id'] ?? $traceId, 'browser_received'),
-            'display_requested' => $push->ackStage($send['trace_id'] ?? $traceId, 'display_requested'),
-            'payload_mode' => $payloadMode,
             'fcm_project_id' => $push->projectId(),
-            'credential_project_id' => $push->credentialProjectId(),
             'message_id' => $send['message_id'] ?? null,
             'token_fingerprint' => $send['token_fingerprint'] ?? null,
             'device_match' => $matched ? 'MATCHED' : 'MISMATCHED',
@@ -267,8 +248,8 @@ class UserController extends Controller
 
         $flashKey = $result['success'] ? 'success' : 'error';
         $flashMessage = $result['success']
-            ? 'FCM_ACCEPTED ('.$payloadMode.'). Trace: '.$result['trace_id'].'. Bukan bukti browser menerima. Hop berikutnya: RAW_PUSH_RECEIVED atau FOREGROUND_RECEIVED.'
-            : 'Test Web Push gagal: '.$result['reason'].' · Trace: '.$result['trace_id'];
+            ? 'FCM_ACCEPTED. Cek notification bar HP. Pesan diterima FCM belum berarti notifikasi tampil.'
+            : 'Test notifikasi gagal: '.$result['reason'];
 
         return redirect()->back()->with($flashKey, $flashMessage)->with('push_test', $result);
     }

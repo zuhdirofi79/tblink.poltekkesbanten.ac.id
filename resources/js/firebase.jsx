@@ -6,9 +6,7 @@ function envValue(key) {
     return typeof value === 'string' ? value.trim() : '';
 }
 
-export const CANONICAL_SW_SCRIPT = '/service-worker.js';
-export const CANONICAL_SW_SCOPE = '/';
-export const EXPECTED_SW_VERSION = 'controltb-sw-v8';
+export const MESSAGING_SW_SCRIPT = '/firebase-messaging-sw.js';
 
 export const firebaseWebConfig = {
     apiKey: envValue('VITE_FIREBASE_API_KEY'),
@@ -33,46 +31,6 @@ function assertFirebaseWebConfig() {
     }
 }
 
-export function parseFcmPayload(payload) {
-    const data = payload?.data || {};
-    const notif = payload?.notification || {};
-    const title = notif.title || data.title || 'Control TB';
-    const body = notif.body || data.body || '';
-    const icon = data.icon || notif.icon || '/menkes192.png';
-    const badge = data.badge || '/menkes192.png';
-    const tag = data.tag || notif.tag || 'controltb-reminder';
-    const url = data.url || data.link || '/dashboard';
-    const traceId = data.push_trace_id || '';
-    const type = data.type || '';
-    const historyId = data.history_id || '';
-    const payloadMode = data.payload_mode || '';
-    const ackRaw = data.ack_raw || '';
-    const ackParsed = data.ack_parsed || '';
-    const ackReceived = data.ack_received || '';
-    const ackDisplayed = data.ack_displayed || '';
-    const ackClicked = data.ack_clicked || '';
-    const ackFailed = data.ack_failed || '';
-
-    return {
-        title,
-        body,
-        icon,
-        badge,
-        tag,
-        url,
-        traceId,
-        type,
-        historyId,
-        payloadMode,
-        ackRaw,
-        ackParsed,
-        ackReceived,
-        ackDisplayed,
-        ackClicked,
-        ackFailed,
-    };
-}
-
 export async function hashToken(token) {
     if (!token || typeof crypto === 'undefined' || !crypto.subtle) {
         return '';
@@ -90,222 +48,57 @@ export function fingerprintFromHash(hash) {
     return (hash || '').slice(0, 12);
 }
 
-function xsrfHeaders() {
-    const headers = {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-    };
-    const meta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
-    if (meta) {
-        headers['X-CSRF-TOKEN'] = meta;
+function getFirebaseApp() {
+    if (getApps().length > 0) {
+        return getApp();
     }
-    const match = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]+)/);
-    if (match) {
-        headers['X-XSRF-TOKEN'] = decodeURIComponent(match[1]);
-    }
-    return headers;
-}
 
-function detectPlatformSafe() {
-    const ua = navigator.userAgent || '';
-    if (/Android/i.test(ua)) {
-        return 'android';
-    }
-    if (/iPhone|iPad|iPod/i.test(ua)) {
-        return 'ios';
-    }
-    return 'desktop';
-}
-
-export async function reportPushDiagnostic(event, extras = {}) {
-    try {
-        await fetch('/push/client-diagnostic', {
-            method: 'POST',
-            credentials: 'same-origin',
-            keepalive: true,
-            headers: xsrfHeaders(),
-            body: JSON.stringify({
-                event,
-                push_trace_id: extras.push_trace_id || extras.traceId || null,
-                token_fingerprint: extras.token_fingerprint || extras.fingerprint || null,
-                message: String(extras.message || '').slice(0, 200),
-                platform: extras.platform || detectPlatformSafe(),
-            }),
-        });
-    } catch {
-        // diagnostics must never break notification flow
-    }
+    return initializeApp(firebaseWebConfig);
 }
 
 let app = null;
 let messaging = null;
 let initPromise = null;
 let foregroundBound = false;
-let lastGetTokenRegistration = { scriptURL: '', scope: '' };
 
-function rememberGetTokenRegistration(registration) {
-    lastGetTokenRegistration = {
-        scriptURL: registration?.active?.scriptURL || registration?.installing?.scriptURL || '',
-        scope: registration?.scope || '',
-    };
-    console.info('[FCM_CLIENT][GETTOKEN_REGISTRATION]', lastGetTokenRegistration);
-    return lastGetTokenRegistration;
+function isObsoleteCustomWorker(registration) {
+    const script = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+    return script.includes('/service-worker.js') && !script.includes('firebase-messaging-sw.js');
 }
 
-export function getLastGetTokenRegistration() {
-    return lastGetTokenRegistration;
-}
-
-export function getOnMessageAttached() {
-    return foregroundBound;
-}
-
-export function getFirebaseAppCount() {
-    try {
-        return getApps().length;
-    } catch {
-        return app ? 1 : 0;
-    }
-}
-
-function getFirebaseApp() {
-    if (getApps().length > 0) {
-        return getApp();
-    }
-    return initializeApp(firebaseWebConfig);
-}
-
-export async function listServiceWorkerRegistrations() {
+async function unregisterObsoleteWorkers() {
     if (!('serviceWorker' in navigator)) {
-        return [];
+        return;
     }
-    const regs = await navigator.serviceWorker.getRegistrations();
-    return regs.map((reg) => ({
-        scriptURL: reg.active?.scriptURL || reg.waiting?.scriptURL || reg.installing?.scriptURL || '',
-        scope: reg.scope,
-        state: reg.active?.state || reg.waiting?.state || reg.installing?.state || 'unknown',
-    }));
+
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(
+        registrations.filter(isObsoleteCustomWorker).map((registration) => registration.unregister()),
+    );
 }
 
-export async function getPushRegistration() {
-    try {
-        const registration = await navigator.serviceWorker.register(CANONICAL_SW_SCRIPT, { scope: CANONICAL_SW_SCOPE });
-        await navigator.serviceWorker.ready;
-        rememberGetTokenRegistration(registration);
-        return registration;
-    } catch (error) {
-        await reportPushDiagnostic('SERVICE_WORKER_READY_FAILED', { message: error?.message || String(error) });
-        throw error;
-    }
+export async function getMessagingRegistration() {
+    await unregisterObsoleteWorkers();
+    const registration = await navigator.serviceWorker.register(MESSAGING_SW_SCRIPT);
+    await navigator.serviceWorker.ready;
+    return registration;
 }
 
-async function displaySystemNotification(payload) {
-    const parsed = parseFcmPayload(payload);
-    console.info('[FCM] showNotification requested', { title: parsed.title, tag: parsed.tag, trace_id: parsed.traceId });
-
-    if (Notification.permission !== 'granted') {
-        await reportPushDiagnostic('PUSH_PERMISSION_DENIED', { push_trace_id: parsed.traceId, message: 'permission not granted' });
-        throw new Error('Notification permission is not granted');
-    }
-
+async function showForegroundNotification(payload) {
+    const title = payload?.notification?.title || payload?.data?.title || 'Control TB';
+    const body = payload?.notification?.body || payload?.data?.body || '';
+    const url = payload?.data?.url || payload?.data?.link || '/pasien/notifikasi';
     const registration = await navigator.serviceWorker.ready;
-    if (!registration?.showNotification) {
-        await reportPushDiagnostic('SERVICE_WORKER_NOT_READY', { push_trace_id: parsed.traceId });
-        throw new Error('ServiceWorkerRegistration.showNotification is unavailable');
-    }
 
-    await registration.showNotification(parsed.title, {
-        body: parsed.body,
-        icon: parsed.icon,
-        badge: parsed.badge,
-        tag: parsed.tag,
-        renotify: true,
+    await registration.showNotification(title, {
+        body,
+        icon: '/menkes192.png',
+        badge: '/menkes192.png',
         data: {
-            url: parsed.url,
-            push_trace_id: parsed.traceId,
-            ack_clicked: parsed.ackClicked || '',
+            ...(payload?.data || {}),
+            url,
         },
     });
-
-    console.info('[FCM] showNotification success', { trace_id: parsed.traceId });
-    if (parsed.ackDisplayed) {
-        fetch(parsed.ackDisplayed, { keepalive: true }).catch(() => {});
-    }
-    await reportPushDiagnostic('DISPLAY_REQUESTED', { push_trace_id: parsed.traceId });
-    try {
-        localStorage.setItem(
-            'controltb_last_foreground_display',
-            JSON.stringify({ at: Date.now(), traceId: parsed.traceId, status: 'DISPLAY_REQUESTED' }),
-        );
-    } catch {
-        // ignore quota
-    }
-    window.dispatchEvent(
-        new CustomEvent('controltb-fcm-display', {
-            detail: { status: 'DISPLAY_REQUESTED', ...parsed, at: Date.now() },
-        }),
-    );
-
-    return parsed;
-}
-
-async function handleForegroundMessage(payload) {
-    console.info('[FCM_CLIENT][ONMESSAGE_RECEIVED]');
-    const parsed = parseFcmPayload(payload);
-    if (parsed.ackRaw) {
-        fetch(parsed.ackRaw, { keepalive: true }).catch(() => {});
-    }
-    if (parsed.ackReceived) {
-        fetch(parsed.ackReceived, { keepalive: true }).catch(() => {});
-    }
-    if (parsed.ackParsed) {
-        fetch(parsed.ackParsed, { keepalive: true }).catch(() => {});
-    }
-    await reportPushDiagnostic('ONMESSAGE_RECEIVED', { push_trace_id: parsed.traceId });
-    await reportPushDiagnostic('FOREGROUND_RECEIVED', { push_trace_id: parsed.traceId });
-    try {
-        localStorage.setItem(
-            'controltb_last_foreground',
-            JSON.stringify({ at: Date.now(), traceId: parsed.traceId, title: parsed.title }),
-        );
-    } catch {
-        // ignore quota
-    }
-    window.dispatchEvent(
-        new CustomEvent('controltb-fcm-foreground', {
-            detail: { ...parsed, at: Date.now() },
-        }),
-    );
-
-    try {
-        await displaySystemNotification(payload);
-    } catch (error) {
-        console.error('[FCM] showNotification error', error);
-        await reportPushDiagnostic('SHOW_NOTIFICATION_FAILED', {
-            push_trace_id: parsed.traceId,
-            message: error?.message || String(error),
-        });
-        if (parsed.ackFailed) {
-            fetch(
-                parsed.ackFailed + (parsed.ackFailed.includes('?') ? '&' : '?') + 'err=' + encodeURIComponent(String(error?.message || 'showNotification').slice(0, 120)),
-                { keepalive: true },
-            ).catch(() => {});
-        }
-        try {
-            localStorage.setItem(
-                'controltb_last_foreground_error',
-                JSON.stringify({ at: Date.now(), error: error?.message || String(error), traceId: parsed.traceId }),
-            );
-        } catch {
-            // ignore
-        }
-        window.dispatchEvent(
-            new CustomEvent('controltb-fcm-display', {
-                detail: { status: 'DISPLAY_FAILED', error: error?.message || String(error), at: Date.now(), traceId: parsed.traceId },
-            }),
-        );
-    }
 }
 
 export async function initFirebaseMessaging() {
@@ -319,110 +112,62 @@ export async function initFirebaseMessaging() {
         }
 
         assertFirebaseWebConfig();
-        await getPushRegistration();
-
+        await getMessagingRegistration();
         app = getFirebaseApp();
         if (!messaging) {
             messaging = getMessaging(app);
         }
         if (!foregroundBound) {
-            try {
-                onMessage(messaging, (payload) => {
-                    void handleForegroundMessage(payload);
-                });
-                foregroundBound = true;
-                window.__CONTROLTB_ONMESSAGE_ATTACHED = true;
-                console.info('[FCM_CLIENT][ONMESSAGE_ATTACHED]', {
-                    projectId: firebaseWebConfig.projectId,
-                    messagingSenderId: firebaseWebConfig.messagingSenderId,
-                    appCount: getApps().length,
-                });
-                await reportPushDiagnostic('ONMESSAGE_ATTACHED', { message: 'onMessage attached to page messaging singleton' });
-                window.dispatchEvent(
-                    new CustomEvent('controltb-fcm-onmessage-attached', {
-                        detail: { at: Date.now(), appCount: getApps().length },
-                    }),
-                );
-            } catch (error) {
-                foregroundBound = false;
-                await reportPushDiagnostic('ONMESSAGE_SETUP_FAILED', { message: error?.message || String(error) });
-                throw error;
-            }
+            onMessage(messaging, (payload) => {
+                void showForegroundNotification(payload);
+            });
+            foregroundBound = true;
         }
 
         return messaging;
     })().catch((error) => {
-        console.info('[FCM] Firebase messaging is unavailable in this browser.', error);
-        void reportPushDiagnostic('ONMESSAGE_SETUP_FAILED', { message: error?.message || String(error) });
-        void reportPushDiagnostic('FCM_ONMESSAGE_ERROR', { message: error?.message || String(error) });
+        console.error('[FCM] messaging init failed', error);
         messaging = null;
         initPromise = null;
-        return null;
+        throw error;
     });
 
     return initPromise;
 }
 
-async function getTokenWithCanonicalSw(vapidKey) {
-    const registration = await getPushRegistration();
-    const meta = rememberGetTokenRegistration(registration);
-    if (!String(meta.scriptURL).includes('service-worker.js')) {
-        await reportPushDiagnostic('GET_TOKEN_FAILED', { message: `getToken SW is not canonical: ${meta.scriptURL}` });
-        throw new Error('Canonical /service-worker.js is not the active registration');
+async function tokenFromCanonicalWorker(vapidKey) {
+    const registration = await getMessagingRegistration();
+    const token = await getToken(messaging, {
+        vapidKey,
+        serviceWorkerRegistration: registration,
+    });
+
+    if (!token) {
+        throw new Error('Firebase tidak mengembalikan token. Izinkan notifikasi lalu coba lagi.');
     }
 
-    let currentToken = '';
-    try {
-        currentToken = await getToken(messaging, {
-            vapidKey,
-            serviceWorkerRegistration: registration,
-        });
-    } catch (error) {
-        await reportPushDiagnostic('GET_TOKEN_FAILED', { message: error?.message || String(error) });
-        await reportPushDiagnostic('FCM_GET_TOKEN_FAILED', { message: error?.message || String(error) });
-        throw error;
-    }
-
-    return currentToken;
+    return token;
 }
 
 export const getFBToken = async (vapidPublicKey) => {
-    const ready = await initFirebaseMessaging();
-    if (!ready) {
-        throw new Error('Push messaging is not supported in this browser');
-    }
-
+    await initFirebaseMessaging();
     const vapidKey = (vapidPublicKey || firebaseVapidKey || '').trim();
     if (!vapidKey) {
         throw new Error('VAPID public key is missing');
     }
 
-    const currentToken = await getTokenWithCanonicalSw(vapidKey);
-    if (!currentToken) {
-        await reportPushDiagnostic('FCM_TOKEN_EMPTY', { message: 'getToken returned empty' });
-        throw new Error('No registration token available. Request permission to generate token');
-    }
-
-    const hash = await hashToken(currentToken);
-    console.info('[FCM] current registration fingerprint', fingerprintFromHash(hash));
-
-    return currentToken;
+    return tokenFromCanonicalWorker(vapidKey);
 };
 
 export async function peekFBToken(vapidPublicKey) {
-    const ready = await initFirebaseMessaging();
-    if (!ready || Notification.permission !== 'granted') {
-        return '';
-    }
-
-    const vapidKey = (vapidPublicKey || firebaseVapidKey || '').trim();
-    if (!vapidKey) {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
         return '';
     }
 
     try {
-        return (await getTokenWithCanonicalSw(vapidKey)) || '';
-    } catch {
+        return await getFBToken(vapidPublicKey);
+    } catch (error) {
+        console.error('[FCM] peek token failed', error);
         return '';
     }
 }
@@ -430,7 +175,7 @@ export async function peekFBToken(vapidPublicKey) {
 export const clearFBToken = async () => {
     try {
         await initFirebaseMessaging();
-        const registration = await getPushRegistration();
+        const registration = await getMessagingRegistration();
         const subscription = await registration.pushManager.getSubscription();
         if (subscription) {
             await subscription.unsubscribe();
@@ -440,84 +185,61 @@ export const clearFBToken = async () => {
         }
         return true;
     } catch (error) {
-        console.info('[FCM] Unable to clear FCM token', error);
+        console.error('[FCM] clear token failed', error);
         return false;
     }
 };
 
-function isFallbackFirebaseSw(reg) {
-    const script = reg.active?.scriptURL || reg.waiting?.scriptURL || reg.installing?.scriptURL || '';
-    const scope = reg.scope || '';
-    return script.includes('firebase-messaging-sw.js') || scope.includes('firebase-cloud-messaging-push-scope');
-}
-
-export async function hardReregisterCurrentDevice(vapidPublicKey) {
+export async function resetCurrentDeviceMessaging(vapidPublicKey) {
     const vapidKey = (vapidPublicKey || firebaseVapidKey || '').trim();
     if (!vapidKey) {
         throw new Error('VAPID public key is missing');
     }
 
-    const ready = await initFirebaseMessaging();
-    if (!ready) {
-        throw new Error('Push messaging is not supported in this browser');
-    }
+    await initFirebaseMessaging();
 
-    try {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        for (const reg of registrations) {
-            if (isFallbackFirebaseSw(reg)) {
-                await reg.unregister();
-            }
-        }
-
-        const canonical = await getPushRegistration();
-        const existing = await canonical.pushManager.getSubscription();
-        if (existing) {
-            await existing.unsubscribe();
-        }
-
+    if (messaging) {
         try {
             await deleteToken(messaging);
-        } catch {
-            // Token may already be invalid.
+        } catch (error) {
+            console.error('[FCM] deleteToken failed', error);
         }
-
-        const registration = await navigator.serviceWorker.register(CANONICAL_SW_SCRIPT, { scope: CANONICAL_SW_SCOPE });
-        await navigator.serviceWorker.ready;
-        rememberGetTokenRegistration(registration);
-
-        const token = await getToken(messaging, {
-            vapidKey,
-            serviceWorkerRegistration: registration,
-        });
-
-        if (!token) {
-            throw new Error('Hard re-register getToken returned empty');
-        }
-
-        const hash = await hashToken(token);
-        await reportPushDiagnostic('HARD_REREGISTER_OK', {
-            fingerprint: fingerprintFromHash(hash),
-            message: `sw=${registration.active?.scriptURL || ''}`,
-        });
-
-        return token;
-    } catch (error) {
-        await reportPushDiagnostic('HARD_REREGISTER_FAILED', { message: error?.message || String(error) });
-        throw error;
     }
+
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    for (const registration of registrations) {
+        const script = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+        if (isObsoleteCustomWorker(registration)) {
+            const subscription = await registration.pushManager.getSubscription();
+            if (subscription) {
+                await subscription.unsubscribe();
+            }
+            await registration.unregister();
+            continue;
+        }
+        if (script.includes('firebase-messaging-sw.js')) {
+            const subscription = await registration.pushManager.getSubscription();
+            if (subscription) {
+                await subscription.unsubscribe();
+            }
+        }
+    }
+
+    const registration = await navigator.serviceWorker.register(MESSAGING_SW_SCRIPT);
+    await navigator.serviceWorker.ready;
+
+    const token = await getToken(messaging, {
+        vapidKey,
+        serviceWorkerRegistration: registration,
+    });
+
+    if (!token) {
+        throw new Error('Reset gagal: Firebase tidak mengembalikan token baru.');
+    }
+
+    return token;
 }
 
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-    void initFirebaseMessaging();
-
-    navigator.serviceWorker.addEventListener('message', (event) => {
-        const data = event.data || {};
-        if (data.type === 'controltb-fcm-background') {
-            window.dispatchEvent(new CustomEvent('controltb-fcm-background', { detail: data }));
-        }
-        if (data.type === 'controltb-push-diag') {
-            window.dispatchEvent(new CustomEvent('controltb-sw-version', { detail: { version: data.sw_version || '', diag: data.diag } }));
-        }
-    });
+    void initFirebaseMessaging().catch(() => {});
 }

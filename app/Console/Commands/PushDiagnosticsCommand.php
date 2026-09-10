@@ -43,7 +43,7 @@ class PushDiagnosticsCommand extends Command
             ['credentials_readable', is_file($credentialsPath) && is_readable($credentialsPath) ? 'yes' : 'no'],
             ['queue_driver', (string) config('queue.default')],
             ['timezone', (string) config('app.timezone')],
-            ['service_worker_url', rtrim((string) config('app.url'), '/').'/service-worker.js'],
+            ['service_worker_url', rtrim((string) config('app.url'), '/').'/firebase-messaging-sw.js'],
             ['user_push_subscriptions_table', $subscriptionTable],
             ['subscription_rows', $subscriptionRows],
         ]);

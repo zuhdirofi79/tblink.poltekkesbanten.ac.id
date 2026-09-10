@@ -50,21 +50,6 @@
 
 <body class="font-sans antialiased">
     @inertia
-    <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function() {
-                // Canonical Web Push owner: /service-worker.js at scope "/".
-                // Do not register /firebase-messaging-sw.js here.
-                navigator.serviceWorker.register('/service-worker.js', { scope: '/' }).then(function(registration) {
-                    // Registration was successful
-                    console.log('ServiceWorker registration successful with scope: ', registration.scope);
-                }, function(err) {
-                    // registration failed :(
-                    console.log('ServiceWorker registration failed: ', err);
-                });
-            });
-        }
-    </script>
 </body>
 
 </html>

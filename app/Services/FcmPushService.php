@@ -39,24 +39,16 @@ class FcmPushService
         }
 
         $url = $url !== '' ? $url : rtrim((string) config('app.url'), '/').'/dashboard';
-        $icon = rtrim((string) config('app.url'), '/').'/menkes192.png';
         $targetUserId = isset($extraData['_target_user_id']) ? (int) $extraData['_target_user_id'] : null;
         $deviceSource = (string) ($extraData['_source'] ?? '');
         $deviceLabel = (string) ($extraData['_device_label'] ?? '');
         $platform = (string) ($extraData['_platform'] ?? '');
         $lastSeenAt = (string) ($extraData['_last_seen_at'] ?? '');
-        $payloadMode = strtolower((string) ($extraData['_payload_mode'] ?? 'data'));
-        if (! in_array($payloadMode, ['notification', 'data'], true)) {
-            $payloadMode = 'data';
-        }
         foreach (array_keys($extraData) as $key) {
             if (str_starts_with((string) $key, '_')) {
                 unset($extraData[$key]);
             }
         }
-        $tag = (string) ($extraData['tag'] ?? ($historyJadwalObatId > 0
-            ? 'medication-'.$historyJadwalObatId
-            : 'controltb-reminder'));
 
         try {
             $accessToken = $this->accessToken();
@@ -77,57 +69,36 @@ class FcmPushService
             }
 
             $data = [
-                'title' => $title,
-                'body' => $body,
-                'link' => $url,
-                'url' => $url,
-                'icon' => $icon,
-                'badge' => $icon,
-                'tag' => $tag,
                 'type' => $type,
-                'history_id' => (string) $historyJadwalObatId,
+                'url' => $url,
                 'push_trace_id' => $traceId,
-                'payload_mode' => $payloadMode,
-                'ack_raw' => $this->ackUrl($traceId, 'raw_push_received'),
-                'ack_parsed' => $this->ackUrl($traceId, 'payload_parsed'),
-                'ack_parse_failed' => $this->ackUrl($traceId, 'payload_parse_failed'),
-                'ack_received' => $this->ackUrl($traceId, 'browser_received'),
-                'ack_displayed' => $this->ackUrl($traceId, 'display_requested'),
-                'ack_failed' => $this->ackUrl($traceId, 'display_failed'),
-                'ack_clicked' => $this->ackUrl($traceId, 'notification_clicked'),
             ];
+            if ($historyJadwalObatId > 0) {
+                $data['history_id'] = (string) $historyJadwalObatId;
+            }
             foreach ($extraData as $key => $value) {
                 $data[(string) $key] = $value;
             }
             $data = $this->stringifyDataMap($data);
 
-            $message = [
-                'token' => $token,
-                'data' => $data,
-                'webpush' => [
-                    'headers' => [
-                        'Urgency' => 'high',
+            $payload = [
+                'message' => [
+                    'token' => $token,
+                    'notification' => [
+                        'title' => $title,
+                        'body' => $body,
                     ],
-                    'fcm_options' => [
-                        'link' => $url,
+                    'data' => $data,
+                    'webpush' => [
+                        'headers' => [
+                            'Urgency' => 'high',
+                            'TTL' => '300',
+                        ],
+                        'fcm_options' => [
+                            'link' => $url,
+                        ],
                     ],
                 ],
-            ];
-
-            if ($payloadMode === 'notification') {
-                $message['notification'] = [
-                    'title' => $title,
-                    'body' => $body,
-                ];
-                $message['webpush']['notification'] = [
-                    'title' => $title,
-                    'body' => $body,
-                    'icon' => $icon,
-                ];
-            }
-
-            $payload = [
-                'message' => $message,
             ];
 
             $this->diag->info('FCM_SEND_START', [
@@ -136,10 +107,6 @@ class FcmPushService
                 'target_user_id' => $targetUserId,
                 'token_fingerprint' => $fingerprint,
                 'notification_type' => $type,
-                'payload_mode' => $payloadMode,
-                'has_notification_block' => $payloadMode === 'notification',
-                'data_keys' => implode(',', array_keys($data)),
-                'all_data_strings' => $this->allValuesAreStrings($data),
                 'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
                 'source' => $deviceSource ?: null,
                 'platform' => $platform ?: null,
@@ -164,12 +131,9 @@ class FcmPushService
                     'target_user_id' => $targetUserId,
                     'token_fingerprint' => $fingerprint,
                     'notification_type' => $type,
-                    'payload_mode' => $payloadMode,
                     'fcm_http_status' => $status,
                     'fcm_message_id' => $messageId,
                     'result' => 'FCM_ACCEPTED',
-                    'next_expected_hop' => 'RAW_PUSH_RECEIVED or FOREGROUND_RECEIVED',
-                    'failed_hop_if_silent' => 'FCM_ACCEPTED → BROWSER_RECEIVED',
                     'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
                 ]);
 
@@ -400,13 +364,6 @@ class FcmPushService
         $this->store->forget($user, $token);
     }
 
-    public function ackStage(string $traceId, string $stage): ?string
-    {
-        $value = Cache::get('push_ack:'.$traceId.':'.$stage);
-
-        return is_string($value) ? $value : null;
-    }
-
     public function tokenHash(?string $token): ?string
     {
         $token = trim((string) $token);
@@ -517,33 +474,6 @@ class FcmPushService
         }
 
         return $out;
-    }
-
-    /**
-     * @param  array<string, mixed>  $data
-     */
-    private function allValuesAreStrings(array $data): bool
-    {
-        foreach ($data as $value) {
-            if (! is_string($value)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private function ackUrl(string $traceId, string $stage): string
-    {
-        $exp = now()->addHour()->timestamp;
-        $sig = hash_hmac('sha256', $traceId.'|'.$stage.'|'.$exp, (string) config('app.key'));
-
-        return url('/push/ack').'?'.http_build_query([
-            't' => $traceId,
-            's' => $stage,
-            'e' => $exp,
-            'sig' => $sig,
-        ]);
     }
 
     private function accessToken(): string
