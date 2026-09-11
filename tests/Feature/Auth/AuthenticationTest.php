@@ -41,3 +41,17 @@ test('users can logout', function () {
     $this->assertGuest();
     $response->assertRedirect('/');
 });
+
+test('guest visiting dashboard is returned there after login', function () {
+    $user = User::factory()->create();
+
+    $this->get('/dashboard')->assertRedirect('/login');
+
+    $response = $this->post('/login', [
+        'username' => $user->username,
+        'password' => 'password',
+    ]);
+
+    $this->assertAuthenticated();
+    $response->assertRedirect('/dashboard');
+});

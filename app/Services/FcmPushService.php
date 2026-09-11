@@ -38,7 +38,6 @@ class FcmPushService
             return $this->result(false, null, 'empty_token', null, $fingerprint, $traceId);
         }
 
-        $url = $url !== '' ? $url : rtrim((string) config('app.url'), '/').'/dashboard';
         $targetUserId = isset($extraData['_target_user_id']) ? (int) $extraData['_target_user_id'] : null;
         $deviceSource = (string) ($extraData['_source'] ?? '');
         $deviceLabel = (string) ($extraData['_device_label'] ?? '');
@@ -49,6 +48,7 @@ class FcmPushService
                 unset($extraData[$key]);
             }
         }
+        $url = $this->resolveClickUrl($url);
 
         try {
             $accessToken = $this->accessToken();
@@ -68,38 +68,23 @@ class FcmPushService
                 return $this->result(false, null, 'missing_project_id', null, $fingerprint, $traceId);
             }
 
-            $data = [
-                'type' => $type,
-                'url' => $url,
-                'push_trace_id' => $traceId,
-            ];
-            if ($historyJadwalObatId > 0) {
-                $data['history_id'] = (string) $historyJadwalObatId;
-            }
-            foreach ($extraData as $key => $value) {
-                $data[(string) $key] = $value;
-            }
-            $data = $this->stringifyDataMap($data);
+            $payload = $this->buildMessagePayload(
+                $token,
+                $title,
+                $body,
+                $url,
+                $historyJadwalObatId,
+                $traceId,
+                $type,
+                $extraData,
+            );
 
-            $payload = [
-                'message' => [
-                    'token' => $token,
-                    'notification' => [
-                        'title' => $title,
-                        'body' => $body,
-                    ],
-                    'data' => $data,
-                    'webpush' => [
-                        'headers' => [
-                            'Urgency' => 'high',
-                            'TTL' => '300',
-                        ],
-                        'fcm_options' => [
-                            'link' => $url,
-                        ],
-                    ],
-                ],
-            ];
+            $this->diag->info('FCM_LINK', [
+                'push_trace_id' => $traceId,
+                'notification_type' => $type,
+                'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
+                'target_url' => $payload['message']['webpush']['fcm_options']['link'] ?? $url,
+            ]);
 
             $this->diag->info('FCM_SEND_START', [
                 'push_trace_id' => $traceId,
@@ -108,6 +93,7 @@ class FcmPushService
                 'token_fingerprint' => $fingerprint,
                 'notification_type' => $type,
                 'history_id' => $historyJadwalObatId ?: ($extraData['visit_id'] ?? null),
+                'target_url' => $payload['message']['webpush']['fcm_options']['link'] ?? $url,
                 'source' => $deviceSource ?: null,
                 'platform' => $platform ?: null,
                 'device_label' => $deviceLabel ?: null,
@@ -198,6 +184,99 @@ class FcmPushService
             ]);
 
             return $this->result(false, null, 'exception', null, $fingerprint, $traceId);
+        }
+    }
+
+    /**
+     * Canonical HTTPS click destination for FCM webpush.fcm_options.link and data.url.
+     * External origins are rejected to prevent open redirects.
+     */
+    public function resolveClickUrl(string $url = ''): string
+    {
+        $default = $this->defaultDashboardUrl();
+        $candidate = trim($url);
+        if ($candidate === '') {
+            return $default;
+        }
+
+        $appUrl = rtrim((string) config('app.url'), '/');
+        $allowedHost = strtolower((string) (parse_url($appUrl, PHP_URL_HOST) ?: ''));
+        if (str_starts_with($candidate, '/')) {
+            $candidate = $appUrl.$candidate;
+        }
+
+        $parts = parse_url($candidate);
+        if (! is_array($parts) || empty($parts['host'])) {
+            return $default;
+        }
+
+        if ($allowedHost !== '' && strtolower((string) $parts['host']) !== $allowedHost) {
+            return $default;
+        }
+
+        return $candidate;
+    }
+
+    /**
+     * @param  array<string, mixed>  $extraData
+     * @return array{message: array<string, mixed>}
+     */
+    public function buildMessagePayload(
+        string $token,
+        string $title,
+        string $body,
+        string $url = '',
+        int $historyJadwalObatId = 0,
+        string $traceId = '',
+        string $type = 'push',
+        array $extraData = [],
+    ): array {
+        $url = $this->resolveClickUrl($url);
+        foreach (array_keys($extraData) as $key) {
+            if (str_starts_with((string) $key, '_')) {
+                unset($extraData[$key]);
+            }
+        }
+
+        $data = [
+            'type' => $type,
+            'url' => $url,
+            'push_trace_id' => $traceId,
+        ];
+        if ($historyJadwalObatId > 0) {
+            $data['history_id'] = (string) $historyJadwalObatId;
+        }
+        foreach ($extraData as $key => $value) {
+            $data[(string) $key] = $value;
+        }
+
+        return [
+            'message' => [
+                'token' => $token,
+                'notification' => [
+                    'title' => $title,
+                    'body' => $body,
+                ],
+                'data' => $this->stringifyDataMap($data),
+                'webpush' => [
+                    'headers' => [
+                        'Urgency' => 'high',
+                        'TTL' => '300',
+                    ],
+                    'fcm_options' => [
+                        'link' => $url,
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    public function defaultDashboardUrl(): string
+    {
+        try {
+            return route('dashboard');
+        } catch (\Throwable) {
+            return rtrim((string) config('app.url'), '/').'/dashboard';
         }
     }
 
