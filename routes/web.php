@@ -43,7 +43,7 @@ Route::prefix('pasien')->name('pasien.')->group(function () {
     });
     Route::get('/data-pasien', [PasienController::class, 'data_pasien'])->name('data-pasien');
     Route::get('notifikasi', [PasienController::class, 'notifikasi_pasien'])->middleware('auth')->name('notifikasi');
-    Route::middleware(['auth', 'can:Admin'])->controller(PasienController::class)->group(function () {
+    Route::middleware(['auth', 'manage-pasien'])->controller(PasienController::class)->group(function () {
         Route::get('/', 'index')->name('index');
         Route::get('/show/{pasien}', 'show')->name('show');
         Route::get('/create', 'create')->name('create');

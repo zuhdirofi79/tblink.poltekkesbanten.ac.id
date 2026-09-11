@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -10,7 +11,7 @@ import { EditIcon, EllipsisIcon, Hospital, List, Tablets, TrashIcon } from 'luci
 import React, { useRef, useState } from 'react'
 import { toast } from 'sonner'
 
-export default function Pasien({ pasien }) {
+export default function Pasien({ pasien, canSelectPuskesmas = false }) {
     const [psn, setPsn] = useState()
     const [dialogOpen, setDialogOpen] = useState(false)
     const breadcrumbs = [
@@ -34,19 +35,25 @@ export default function Pasien({ pasien }) {
             preserveScroll: true,
         });
     }
+    const fDel = useForm()
+    const closeDialog = (force = false) => {
+        if (fDel.processing && !force) {
+            return
+        }
+        setDialogOpen(false)
+        setTimeout(() => setPsn(undefined), 300)
+    }
     const delPasien = p => {
         setPsn(p)
         setTimeout(() => setDialogOpen(true))
     }
-    const closeDialog = () => {
-        setDialogOpen(false)
-        setTimeout(() => setPsn(undefined), 300)
-    }
-    const fDel = useForm()
     const submitDel = () => {
+        if (fDel.processing) {
+            return
+        }
         if (psn) {
             fDel.delete(route('pasien.delete', psn.id), {
-                onSuccess: () => closeDialog()
+                onSuccess: () => closeDialog(true),
             })
         } else {
             toast.error('Pasien tidak ditemukan')
@@ -71,63 +78,65 @@ export default function Pasien({ pasien }) {
                             }
                         }} ref={txtSearch} placeholder="Masukkan Nama/NIK Pasien" />
                     </div>
-                    <Table>
-                        <TableHeader>
-                            <TableRow>
-                                <TableHead></TableHead>
-                                <TableHead>No</TableHead>
-                                <TableHead>Nama</TableHead>
-                                <TableHead>NIK</TableHead>
-                                <TableHead>No HP</TableHead>
-                                <TableHead>Username</TableHead>
-                                <TableHead>Jenis Kelamin</TableHead>
-                                <TableHead>Tipe TB</TableHead>
-                                <TableHead>Tgl Diagnosa</TableHead>
-                                <TableHead>Mulai Pengobatan</TableHead>
-                            </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                            {pasien.data.map((p, i) => (
-                                <TableRow key={i}>
-                                    <TableCell className='flex justify-center'>
-                                        <DropdownMenu>
-                                            <DropdownMenuTrigger asChild>
-                                                <Button size='sm' variant='icon'>
-                                                    <EllipsisIcon />
-                                                </Button>
-                                            </DropdownMenuTrigger>
-                                            <DropdownMenuContent>
-                                                <DropdownMenuItem onClick={() => router.visit(route('pasien.obat.index', p.id))}>
-                                                    <Tablets className='me-1 text-primary' />Obat Pasien
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => router.visit(route('visit.create', p.id))}>
-                                                    <Hospital className='me-1 text-mkg-800' />Jadwal Berobat
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => router.visit(route('pasien.show', p.id))}>
-                                                    <List className='me-1 text-mky-600' />Detail Pasien
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => router.visit(route('pasien.edit', p.id))}>
-                                                    <EditIcon className='me-1 text-amber-600' />Edit
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => delPasien(p)}>
-                                                    <TrashIcon className='me-1 text-red-600' />Delete
-                                                </DropdownMenuItem>
-                                            </DropdownMenuContent>
-                                        </DropdownMenu>
-                                    </TableCell>
-                                    <TableCell>{i + 1}</TableCell>
-                                    <TableCell>{p.nama}</TableCell>
-                                    <TableCell>{p.nik}</TableCell>
-                                    <TableCell>{p.user.no_hp}</TableCell>
-                                    <TableCell>{p.user.username}</TableCell>
-                                    <TableCell>{p.jenis_kelamin}</TableCell>
-                                    <TableCell>{p.tipe_tb}</TableCell>
-                                    <TableCell>{p.tgl_diagnosa}</TableCell>
-                                    <TableCell>{p.mulai_pengobatan}</TableCell>
+                    <div className="overflow-x-auto">
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead></TableHead>
+                                    <TableHead>No</TableHead>
+                                    <TableHead>Nama Pasien</TableHead>
+                                    <TableHead>Username</TableHead>
+                                    <TableHead>Puskesmas</TableHead>
+                                    <TableHead>Pendamping</TableHead>
+                                    <TableHead>Status</TableHead>
+                                    <TableHead>No HP</TableHead>
+                                    <TableHead>Tipe TB</TableHead>
                                 </TableRow>
-                            ))}
-                        </TableBody>
-                    </Table>
+                            </TableHeader>
+                            <TableBody>
+                                {pasien.data.map((p, i) => (
+                                    <TableRow key={p.id ?? i}>
+                                        <TableCell className='flex justify-center'>
+                                            <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                    <Button size='sm' variant='icon'>
+                                                        <EllipsisIcon />
+                                                    </Button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent>
+                                                    <DropdownMenuItem onClick={() => router.visit(route('pasien.obat.index', p.id))}>
+                                                        <Tablets className='me-1 text-primary' />Obat Pasien
+                                                    </DropdownMenuItem>
+                                                    {!canSelectPuskesmas ? (
+                                                        <DropdownMenuItem onClick={() => router.visit(route('visit.create', p.id))}>
+                                                            <Hospital className='me-1 text-mkg-800' />Jadwal Berobat
+                                                        </DropdownMenuItem>
+                                                    ) : null}
+                                                    <DropdownMenuItem onClick={() => router.visit(route('pasien.show', p.id))}>
+                                                        <List className='me-1 text-mky-600' />Detail
+                                                    </DropdownMenuItem>
+                                                    <DropdownMenuItem onClick={() => router.visit(route('pasien.edit', p.id))}>
+                                                        <EditIcon className='me-1 text-amber-600' />Edit
+                                                    </DropdownMenuItem>
+                                                    <DropdownMenuItem onClick={() => delPasien(p)}>
+                                                        <TrashIcon className='me-1 text-red-600' />Hapus
+                                                    </DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                            </DropdownMenu>
+                                        </TableCell>
+                                        <TableCell>{i + 1}</TableCell>
+                                        <TableCell>{p.nama}</TableCell>
+                                        <TableCell>{p.user?.username ?? '-'}</TableCell>
+                                        <TableCell>{p.puskesmas?.nama_puskesmas ?? '-'}</TableCell>
+                                        <TableCell>{p.pendamping?.name ?? '-'}</TableCell>
+                                        <TableCell>{p.status}</TableCell>
+                                        <TableCell>{p.user?.no_hp ?? '-'}</TableCell>
+                                        <TableCell>{p.tipe_tb}</TableCell>
+                                    </TableRow>
+                                ))}
+                            </TableBody>
+                        </Table>
+                    </div>
                     <Pagination>
                         <PaginationContent>
                             {pasien.links.map((l, i) =>
@@ -159,16 +168,21 @@ export default function Pasien({ pasien }) {
             </div>
             {
                 psn ?
-                    <Dialog open={dialogOpen} onOpenChange={fDel.processing ? null : closeDialog}>
+                    <Dialog open={dialogOpen} onOpenChange={fDel.processing ? undefined : closeDialog}>
                         <DialogContent>
                             <DialogHeader>
-                                <DialogTitle>Hapus {psn.nama}?</DialogTitle>
-                                <DialogDescription className="text-destructive"><span className='font-bold'>PERHATIAN</span> Semua data pasien dan pendamping akan dihapus!</DialogDescription>
+                                <DialogTitle>Hapus Pasien?</DialogTitle>
+                                <DialogDescription>
+                                    Anda akan menonaktifkan akun pasien: <span className="font-semibold text-foreground">{psn.nama}</span>.
+                                    Data riwayat pengobatan akan dipertahankan. Pasien tidak dapat login dan tidak akan menerima pengingat obat.
+                                </DialogDescription>
                             </DialogHeader>
 
                             <DialogFooter className='flex gap-2'>
-                                <Button variant='destructive' disabled={fDel.processing} onClick={submitDel}>Hapus</Button>
-                                <Button onClick={closeDialog}>Batal</Button>
+                                <Button variant='outline' disabled={fDel.processing} onClick={closeDialog}>Batal</Button>
+                                <Button variant='destructive' disabled={fDel.processing} onClick={submitDel}>
+                                    {fDel.processing ? 'Memproses...' : 'Hapus Pasien'}
+                                </Button>
                             </DialogFooter>
                         </DialogContent>
                     </Dialog>

@@ -10,7 +10,7 @@ import { Head, useForm } from '@inertiajs/react'
 import moment from 'moment'
 import React from 'react'
 
-export default function EditPasien({ pasien, userPasien, userPendamping }) {
+export default function EditPasien({ pasien, userPasien, userPendamping, canSelectPuskesmas = false, puskesmasOptions = [], tbs = [] }) {
     const { setData, put, processing, errors, data } = useForm({
         ...pasien,
         no_hp: userPasien.no_hp,
@@ -18,6 +18,7 @@ export default function EditPasien({ pasien, userPasien, userPendamping }) {
         nama_pendamping: userPendamping ? userPendamping.name : '',
         no_hp_pendamping: userPendamping ? userPendamping.no_hp : '',
         email_pendamping: userPendamping ? userPendamping.email : '',
+        puskesmas_id: pasien.puskesmas_id ? String(pasien.puskesmas_id) : '',
     })
     const breadcrumb = [
         {
@@ -45,6 +46,22 @@ export default function EditPasien({ pasien, userPasien, userPendamping }) {
                             <CardContent>
                                 <CardTitle className="text-xl">Form Pasien</CardTitle>
                                 <div className="mt-3">
+                                    {canSelectPuskesmas ? (
+                                        <div className="mb-3">
+                                            <Label>Puskesmas*</Label>
+                                            <Select defaultValue={data.puskesmas_id ? String(data.puskesmas_id) : undefined} onValueChange={e => setData('puskesmas_id', e)} required>
+                                                <SelectTrigger>
+                                                    <SelectValue placeholder="Pilih Puskesmas" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {puskesmasOptions.map((item) => (
+                                                        <SelectItem key={item.id} value={String(item.id)}>{item.nama_puskesmas}</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                            <InputError message={errors.puskesmas_id} className="mt-2" />
+                                        </div>
+                                    ) : null}
                                     <div className="mb-3">
                                         <Label>Nama*</Label>
                                         <Input defaultValue={data.nama} onChange={(e) => setData('nama', e.target.value)} type="text" required />
@@ -96,7 +113,7 @@ export default function EditPasien({ pasien, userPasien, userPendamping }) {
                                                 <SelectValue placeholder="Pilih Tipe TB" />
                                             </SelectTrigger>
                                             <SelectContent>
-                                                {['TB Paru', 'TB Kelenjar', 'TB Selaput Otak', 'TB Usus', 'TB Ginjal'].map((item, key) => <SelectItem key={key} value={item}>{item}</SelectItem>)}
+                                                {(tbs.length ? tbs : ['TB Paru', 'TB Kelenjar', 'TB Selaput Otak', 'TB Usus', 'TB Ginjal']).map((item, key) => <SelectItem key={key} value={item}>{item}</SelectItem>)}
                                             </SelectContent>
                                         </Select>
                                         <InputError message={errors.tipe_tb} className="mt-2" />

@@ -93,7 +93,7 @@ const mainNavItems = [
         url: '/pasien',
         route: 'pasien.*',
         icon: Users,
-        permissions: ['Admin'],
+        permissions: ['Admin', 'Superadmin'],
         items: [
             {
                 title: 'Data Pasien',

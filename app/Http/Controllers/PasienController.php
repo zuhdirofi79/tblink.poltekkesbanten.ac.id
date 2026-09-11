@@ -7,13 +7,18 @@ use App\Models\JadwalVisit;
 use App\Models\Obat;
 use App\Models\ObatPasien;
 use App\Models\Pasien;
+use App\Models\Puskesmas;
 use App\Models\TypeTb;
 use App\Models\User;
+use App\Services\FcmPushService;
 use App\Services\MedicationScheduleGenerator;
 use App\Services\ManualMedicationReminderService;
 use Carbon\Carbon;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class PasienController extends Controller
 {
@@ -32,8 +37,8 @@ class PasienController extends Controller
      */
     public function index(Request $r)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        $pasienq = Pasien::with(['user'])->where('puskesmas_id', $puskesmas->id);
+        $this->authorize('viewAny', Pasien::class);
+        $pasienq = $this->scopedPasienQuery()->with(['user', 'puskesmas', 'pendamping']);
         if ($r->q) {
             $pasienq->where(function ($f) use ($r) {
                 $f->where('nama', 'like', '%' . $r->q . '%')
@@ -41,7 +46,8 @@ class PasienController extends Controller
             });
         }
         $pasien = $pasienq->paginate(10);
-        return inertia('pasien/index', compact('pasien'));
+        $canSelectPuskesmas = $this->actor()->canManageAllPatients();
+        return inertia('pasien/index', compact('pasien', 'canSelectPuskesmas'));
     }
 
     /**
@@ -49,8 +55,13 @@ class PasienController extends Controller
      */
     public function create()
     {
+        $this->authorize('create', Pasien::class);
         $tbs = TypeTb::orderBy('tipe_tb')->pluck('tipe_tb');
-        return inertia('pasien/create', compact('tbs'));
+        $canSelectPuskesmas = $this->actor()->canManageAllPatients();
+        $puskesmasOptions = $canSelectPuskesmas
+            ? Puskesmas::orderBy('nama_puskesmas')->get(['id', 'nama_puskesmas'])
+            : collect();
+        return inertia('pasien/create', compact('tbs', 'canSelectPuskesmas', 'puskesmasOptions'));
     }
 
     /**
@@ -58,13 +69,15 @@ class PasienController extends Controller
      */
     public function store(Request $r)
     {
+        $this->authorize('create', Pasien::class);
         $r->validate([
             'nama' => 'required',
             'nik' => 'required',
             'tgl_lahir' => 'required',
             'jenis_kelamin' => 'required',
             'alamat' => 'required',
-            'no_hp' => 'required|unique:users,no_hp',
+            'no_hp' => 'required',
+            'username' => ['nullable', 'string', 'max:50', 'unique:users,username'],
             'tipe_tb' => 'required',
             'jenjang_terapi' => 'required',
             'tgl_diagnosa' => 'nullable',
@@ -73,51 +86,71 @@ class PasienController extends Controller
             'no_hp_pendamping' => 'required_if:nama_pendamping,!=,',
             'hub_dg_pasien' => 'required_if:nama_pendamping,!=,',
             'email_pendamping' => 'nullable',
+        ], [
+            'username.unique' => 'Username sudah digunakan, silakan pilih username lain.',
         ]);
         if ($r->no_hp_pendamping == $r->no_hp) {
             return redirect()->back()->with('error', 'Nomor HP pendamping tidak boleh sama dengan nomor HP pasien');
         }
-        $pw1 = $r->no_hp;
-        $pw2 = $r->no_hp_pendamping;
-        $user_pasien = User::create([
-            'name' => $r->nama,
-            'no_hp' => $r->no_hp,
-            'username' => $this->getUsername($r->nama),
-            'email' => $r->email,
-            'password' => bcrypt($pw1),
-        ]);
-        $successMessage = 'Pasien berhasil ditambahkan, username: ' . $user_pasien->username . ' Password pasien: ' . $pw1;
-        $user_pasien->givePermissionTo('Pasien');
-        if ($r->nama_pendamping) {
-            $user_pendamping = User::create([
-                'name' => $r->nama_pendamping,
-                'no_hp' => $r->no_hp_pendamping,
-                'username' => $this->getUsername($r->nama_pendamping),
-                'email' => $r->email_pendamping,
-                'password' => bcrypt($pw2),
-            ]);
-            $user_pendamping->givePermissionTo('Pendamping');
-            $successMessage .= ' Username pendamping: ' . $user_pendamping->username . '  Password pendamping: ' . $pw2;
+        $puskesmasId = $this->resolvePuskesmasId($r);
+
+        try {
+            return DB::transaction(function () use ($r, $puskesmasId) {
+                $pw1 = $r->no_hp;
+                $pw2 = $r->no_hp_pendamping;
+                $username = filled($r->username)
+                    ? trim((string) $r->username)
+                    : $this->getUsername($r->nama);
+
+                $user_pasien = User::create([
+                    'name' => $r->nama,
+                    'no_hp' => $r->no_hp,
+                    'username' => $username,
+                    'email' => $r->email,
+                    'password' => bcrypt($pw1),
+                ]);
+                $successMessage = 'Pasien berhasil ditambahkan, username: ' . $user_pasien->username . ' Password pasien: ' . $pw1;
+                $user_pasien->givePermissionTo('Pasien');
+                $user_pendamping = null;
+                if ($r->nama_pendamping) {
+                    $user_pendamping = User::create([
+                        'name' => $r->nama_pendamping,
+                        'no_hp' => $r->no_hp_pendamping,
+                        'username' => $this->getUsername($r->nama_pendamping),
+                        'email' => $r->email_pendamping,
+                        'password' => bcrypt($pw2),
+                    ]);
+                    $user_pendamping->givePermissionTo('Pendamping');
+                    $successMessage .= ' Username pendamping: ' . $user_pendamping->username . '  Password pendamping: ' . $pw2;
+                }
+                Pasien::create([
+                    'puskesmas_id' => $puskesmasId,
+                    'nama' => $r->nama,
+                    'nik' => $r->nik,
+                    'tgl_lahir' => $r->tgl_lahir,
+                    'jenis_kelamin' => $r->jenis_kelamin,
+                    'alamat' => $r->alamat,
+                    'tipe_tb' => $r->tipe_tb,
+                    'jenjang_terapi' => $r->jenjang_terapi,
+                    'tgl_diagnosa' => $r->tgl_diagnosa,
+                    'mulai_pengobatan' => $r->mulai_pengobatan,
+                    'selesai_pengobatan' => $r->selesai_pengobatan,
+                    'user_id' => $user_pasien->id,
+                    'pendamping_id' => $user_pendamping?->id,
+                    'hub_dg_pasien' => $r->hub_dg_pasien,
+                    'status' => 'Aktif',
+                ]);
+
+                return redirect(route('pasien.index'))->with('success', $successMessage);
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            if (str_contains(strtolower($e->getMessage()), 'username')) {
+                throw ValidationException::withMessages([
+                    'username' => 'Username sudah digunakan, silakan pilih username lain.',
+                ]);
+            }
+            throw $e;
         }
-        $puskesmas = auth()->user()->puskesmas;
-        $p = Pasien::create([
-            'puskesmas_id' => $puskesmas->id,
-            'nama' => $r->nama,
-            'nik' => $r->nik,
-            'tgl_lahir' => $r->tgl_lahir,
-            'jenis_kelamin' => $r->jenis_kelamin,
-            'alamat' => $r->alamat,
-            'tipe_tb' => $r->tipe_tb,
-            'jenjang_terapi' => $r->jenjang_terapi,
-            'tgl_diagnosa' => $r->tgl_diagnosa,
-            'mulai_pengobatan' => $r->mulai_pengobatan,
-            'selesai_pengobatan' => $r->selesai_pengobatan,
-            'user_id' => $user_pasien->id,
-            'pendamping_id' => isset($user_pendamping) ? $user_pendamping->id : null,
-            'hub_dg_pasien' => $r->hub_dg_pasien,
-            'status' => 'Aktif',
-        ]);
-        return redirect(route('pasien.index'))->with('success', $successMessage);
     }
 
     /**
@@ -125,13 +158,9 @@ class PasienController extends Controller
      */
     public function show(Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        } else {
-            $pasien->load(['user', 'pendamping', 'obats.obat', 'puskesmas', 'obats.jadwal.details']);
-            return inertia('pasien/show', compact('pasien'));
-        }
+        $this->authorize('view', $pasien);
+        $pasien->load(['user', 'pendamping', 'obats.obat', 'puskesmas', 'obats.jadwal.details']);
+        return inertia('pasien/show', compact('pasien'));
     }
 
     /**
@@ -139,14 +168,15 @@ class PasienController extends Controller
      */
     public function edit(Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        } else {
-            $userPasien = $pasien->user;
-            $userPendamping = $pasien->pendamping;
-            return inertia('pasien/edit', compact('pasien', 'userPasien', 'userPendamping'));
-        }
+        $this->authorize('update', $pasien);
+        $userPasien = $pasien->user;
+        $userPendamping = $pasien->pendamping;
+        $canSelectPuskesmas = $this->actor()->canManageAllPatients();
+        $puskesmasOptions = $canSelectPuskesmas
+            ? Puskesmas::orderBy('nama_puskesmas')->get(['id', 'nama_puskesmas'])
+            : collect();
+        $tbs = TypeTb::orderBy('tipe_tb')->pluck('tipe_tb');
+        return inertia('pasien/edit', compact('pasien', 'userPasien', 'userPendamping', 'canSelectPuskesmas', 'puskesmasOptions', 'tbs'));
     }
 
     /**
@@ -154,17 +184,14 @@ class PasienController extends Controller
      */
     public function update(Request $r, Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('update', $pasien);
         $r->validate([
             'nama' => 'required',
             'nik' => 'required',
             'tgl_lahir' => 'required',
             'jenis_kelamin' => 'required',
             'alamat' => 'required',
-            'no_hp' => 'required|unique:users,no_hp,' . $pasien->user_id,
+            'no_hp' => 'required',
             'tipe_tb' => 'required',
             'jenjang_terapi' => 'required',
             'tgl_diagnosa' => 'nullable',
@@ -188,6 +215,12 @@ class PasienController extends Controller
             'selesai_pengobatan' => $r->selesai_pengobatan,
             'status' => $r->status,
         ]);
+        if ($this->actor()->canManageAllPatients() && $r->filled('puskesmas_id')) {
+            $r->validate([
+                'puskesmas_id' => 'exists:puskesmas,id',
+            ]);
+            $pasien->update(['puskesmas_id' => $r->puskesmas_id]);
+        }
         $pasien->user->update([
             'no_hp' => $r->no_hp,
             'email' => $r->email,
@@ -218,19 +251,32 @@ class PasienController extends Controller
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(Pasien $pasien)
+    public function destroy(Pasien $pasien, FcmPushService $push)
     {
+        $this->authorize('delete', $pasien);
+
+        $patientUser = $pasien->user;
+        if (! $patientUser || ! $patientUser->can('Pasien')) {
+            abort(403);
+        }
+        if ($patientUser->can('Admin') || $patientUser->can('Superadmin') || $patientUser->can('User Management')) {
+            abort(403);
+        }
+
         $nama = $pasien->nama;
-        return redirect()->back()->with('success', 'Pasien ' . $nama . ' berhasil dihapus!');
+        DB::transaction(function () use ($pasien, $patientUser, $push) {
+            $pasien->update(['status' => 'Non Aktif']);
+            $patientUser->update(['active' => false]);
+            $push->forgetCurrentDevice($patientUser, null);
+        });
+
+        return redirect()->back()->with('success', 'Akun pasien '.$nama.' berhasil dinonaktifkan.');
     }
 
     #region obat
     public function obat(Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $obatPasien = $pasien->obats()->with(['obat', 'jadwal.details'])->get();
         $today = now()->timezone((string) config('app.timezone'))->toDateString();
         $obatHariIni = HistoryJadwalObatPasien::where('pasien_id', $pasien->id)->with('obat')->whereDate('waktu', $today)->orderBy('waktu')->get();
@@ -238,20 +284,14 @@ class PasienController extends Controller
     }
     public function obatGenerate(Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
         return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal obat berhasil di generate!');
     }
 
     public function storeManualReminder(Request $r, Pasien $pasien, ManualMedicationReminderService $manualReminder)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $r->validate([
             'obat_pasien_id' => 'required|integer',
             'waktu' => ['required', 'regex:/^\d{2}:\d{2}(:\d{2})?$/'],
@@ -274,8 +314,8 @@ class PasienController extends Controller
 
     public function cancelManualReminder(Pasien $pasien, HistoryJadwalObatPasien $history, ManualMedicationReminderService $manualReminder)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id || (int) $history->pasien_id !== (int) $pasien->id) {
+        $this->authorize('update', $pasien);
+        if ((int) $history->pasien_id !== (int) $pasien->id) {
             abort(403);
         }
 
@@ -286,28 +326,20 @@ class PasienController extends Controller
     public function deleteHistJadwalObat(HistoryJadwalObatPasien $historyJadwalObatPasien)
     {
         $pasien = $historyJadwalObatPasien->pasien;
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        abort_unless($pasien, 404);
+        $this->authorize('update', $pasien);
         $historyJadwalObatPasien->delete();
         return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal minum obat berhasil dihapus!');
     }
     public function obatCreate(Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $obats = Obat::orderBy('nama_obat')->get();
         return inertia('pasien/obat/create', compact('pasien', 'obats'));
     }
     public function obatStore(Request $r, Pasien $pasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $r->validate([
             'obat_id' => 'required',
             'mulai_tanggal' => 'required|date',
@@ -345,10 +377,7 @@ class PasienController extends Controller
 
     public function obatEdit(Pasien $pasien, ObatPasien $obatPasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $obats = Obat::orderBy('nama_obat')->get();
         $jadwalObat = $obatPasien->jadwal()->first();
         $detailJadwalObat = $jadwalObat->details()->get();
@@ -356,10 +385,7 @@ class PasienController extends Controller
     }
     public function obatUpdate(Request $r, Pasien $pasien, ObatPasien $obatPasien)
     {
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $r->validate([
             'mulai_tanggal' => 'required|date',
             'selesai_tanggal' => 'required|date',
@@ -412,11 +438,14 @@ class PasienController extends Controller
         $pasien = null;
         if ($user->can('Pasien') || $user->can('Pendamping')) {
             $pasien = $user->relatedPasien();
-        } elseif ($user->can('Admin')) {
+        } elseif ($user->canManagePatients()) {
             $r->validate([
                 'pasien_id' => 'required',
             ]);
             $pasien = Pasien::find($r->pasien_id);
+            if ($pasien) {
+                $this->authorize('view', $pasien);
+            }
         }
         if (! $pasien) {
             return redirect()->route('dashboard')->with('error', 'Data pasien tidak ditemukan untuk akun ini.');
@@ -427,14 +456,57 @@ class PasienController extends Controller
     #endregion
     public function getUsername($name)
     {
-        $rep = str_replace(' ', '', $name);
-        $username = strtolower(substr($rep, 0, 6));
-        $addRow = User::where('username', $username)->withTrashed()->count();
-        $userRows  = User::whereRaw("username REGEXP '^{$username}(-[0-9]*)?$'")->withTrashed()->count();
-        // $userRows = User::where('username', 'like', "{$username}%")->withTrashed()->count();
-        $countUser = $userRows + $addRow + 1;
+        $rep = str_replace(' ', '', (string) $name);
+        $base = strtolower(substr($rep, 0, 6));
+        if ($base === '') {
+            $base = 'pasien';
+        }
 
-        return ($countUser > 0) ? "{$username}{$countUser}" : $username;
+        $i = 1;
+        do {
+            $candidate = $base.$i;
+            $i++;
+        } while (User::withTrashed()->where('username', $candidate)->exists());
+
+        return $candidate;
+    }
+
+    private function actor(): User
+    {
+        /** @var User $user */
+        $user = auth()->user();
+        abort_unless($user, 403);
+
+        return $user;
+    }
+
+    private function scopedPasienQuery()
+    {
+        $query = Pasien::query();
+        if ($this->actor()->canManageAllPatients()) {
+            return $query;
+        }
+
+        $puskesmasId = $this->actor()->puskesmas?->id;
+        abort_unless($puskesmasId, 403);
+
+        return $query->where('puskesmas_id', $puskesmasId);
+    }
+
+    private function resolvePuskesmasId(Request $r): int
+    {
+        if ($this->actor()->canManageAllPatients()) {
+            $r->validate([
+                'puskesmas_id' => 'required|exists:puskesmas,id',
+            ]);
+
+            return (int) $r->puskesmas_id;
+        }
+
+        $puskesmasId = $this->actor()->puskesmas?->id;
+        abort_unless($puskesmasId, 403);
+
+        return (int) $puskesmasId;
     }
     public function send_notif(Request $r, Pasien $pasien, \App\Services\FcmPushService $push)
     {
@@ -443,10 +515,7 @@ class PasienController extends Controller
             'isi' => 'required',
         ]);
         Cache::put('tst', $r->all());
-        $puskesmas = auth()->user()->puskesmas;
-        if ($puskesmas->id != $pasien->puskesmas_id) {
-            abort(403);
-        }
+        $this->authorize('view', $pasien);
         $result = $push->sendToUser($pasien->user, $r->judul, $r->isi);
         if (! $result['success']) {
             return response()->json([

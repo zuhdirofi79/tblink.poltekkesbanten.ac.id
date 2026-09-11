@@ -39,7 +39,7 @@ class MedicationScheduleGenerator
             ->count();
 
         $schedules = JadwalObat::query()
-            ->with(['details', 'op'])
+            ->with(['details', 'op', 'pasien.user'])
             ->when($pasienId, fn ($q) => $q->where('pasien_id', $pasienId))
             ->whereDate('mulai_tanggal', '<=', $today)
             ->whereDate('selesai_tanggal', '>=', $today)
@@ -102,6 +102,19 @@ class MedicationScheduleGenerator
                 'jadwal_id' => $jadwal->id,
                 'detail_id' => null,
                 'result' => 'inactive',
+            ]);
+
+            return;
+        }
+
+        $pasien = $jadwal->pasien;
+        if ($pasien && ($pasien->status !== 'Aktif' || ($pasien->user && $pasien->user->active === false))) {
+            $stats['skipped']++;
+            $this->diag->info('MED_GENERATOR_SKIP', [
+                'jadwal_id' => $jadwal->id,
+                'detail_id' => null,
+                'pasien_id' => $pasien->id,
+                'result' => 'inactive_patient',
             ]);
 
             return;

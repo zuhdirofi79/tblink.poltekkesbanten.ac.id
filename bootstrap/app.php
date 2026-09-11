@@ -28,6 +28,9 @@ return Application::configure(basePath: dirname(__DIR__))
             AddLinkHeadersForPreloadedAssets::class,
             LastSeenMiddleware::class,
         ]);
+        $middleware->alias([
+            'manage-pasien' => \App\Http\Middleware\EnsureCanManagePasien::class,
+        ]);
         $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions) {

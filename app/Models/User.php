@@ -36,6 +36,9 @@ class User extends Authenticatable
         'last_seen',
         'has_push_subscription',
     ];
+    protected $attributes = [
+        'active' => true,
+    ];
     protected $casts = [
         'created_at' => 'datetime'
     ];
@@ -84,7 +87,18 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'active' => 'boolean',
         ];
+    }
+
+    public function canManagePatients(): bool
+    {
+        return $this->can('Admin') || $this->can('Superadmin');
+    }
+
+    public function canManageAllPatients(): bool
+    {
+        return $this->can('Superadmin');
     }
     /**
      * Get the pasien associated with the User

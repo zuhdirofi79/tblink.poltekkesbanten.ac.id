@@ -76,12 +76,24 @@ class SendNotifMinumObatCmd extends Command
                     continue;
                 }
 
+                $pasienUser = $pasien->user;
+                if ($pasien->status !== 'Aktif' || ($pasienUser && $pasienUser->active === false)) {
+                    $diag->info('TARGET_RESOLVE', [
+                        'push_trace_id' => $traceId,
+                        'history_id' => $sch->id,
+                        'pasien_id' => $pasien->id,
+                        'target_user_id' => $pasienUser?->id,
+                        'result' => 'inactive_patient',
+                    ]);
+                    $skipped++;
+                    continue;
+                }
+
                 $obatNama = $sch->obat?->nama_obat ?: 'obat';
                 $scheduled = $sch->waktu instanceof Carbon
                     ? $sch->waktu->copy()
                     : Carbon::parse($sch->waktu);
                 $jam = $scheduled->timezone($timezone)->format('H:i');
-                $pasienUser = $pasien->user;
                 $diag->info('MEDICATION_CANDIDATE', [
                     'history_id' => $sch->id,
                     'pasien_id' => $sch->pasien_id,

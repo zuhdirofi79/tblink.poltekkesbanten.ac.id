@@ -10,7 +10,7 @@ import { Head, useForm } from '@inertiajs/react'
 import moment from 'moment'
 import React from 'react'
 
-export default function PasienCreate({ tbs }) {
+export default function PasienCreate({ tbs, canSelectPuskesmas = false, puskesmasOptions = [] }) {
     const { data, setData, processing, post, errors } = useForm({
         nama: '',
         nik: '',
@@ -28,6 +28,8 @@ export default function PasienCreate({ tbs }) {
         nama_pendamping: '',
         no_hp_pendamping: '',
         email_pendamping: '',
+        puskesmas_id: '',
+        username: '',
     })
     const breadcrumb = [
         {
@@ -55,10 +57,40 @@ export default function PasienCreate({ tbs }) {
                             <CardContent>
                                 <CardTitle className="text-xl">Form Pasien</CardTitle>
                                 <div className="mt-3">
+                                    {canSelectPuskesmas ? (
+                                        <div className="mb-3">
+                                            <Label>Puskesmas*</Label>
+                                            <Select value={data.puskesmas_id ? String(data.puskesmas_id) : undefined} onValueChange={e => setData('puskesmas_id', e)} required>
+                                                <SelectTrigger>
+                                                    <SelectValue placeholder="Pilih Puskesmas" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {puskesmasOptions.map((item) => (
+                                                        <SelectItem key={item.id} value={String(item.id)}>{item.nama_puskesmas}</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                            <InputError message={errors.puskesmas_id} className="mt-2" />
+                                        </div>
+                                    ) : null}
                                     <div className="mb-3">
                                         <Label>Nama*</Label>
-                                        <Input onChange={(e) => setData('nama', e.target.value)} type="text" required />
+                                        <Input value={data.nama} onChange={(e) => {
+                                            const nama = e.target.value
+                                            const suggested = nama.replace(/\s+/g, '').toLowerCase().slice(0, 6)
+                                            const previousSuggested = data.nama.replace(/\s+/g, '').toLowerCase().slice(0, 6)
+                                            const next = { ...data, nama }
+                                            if (!data.username || data.username === previousSuggested || data.username === `${previousSuggested}1`) {
+                                                next.username = suggested ? `${suggested}1` : ''
+                                            }
+                                            setData(next)
+                                        }} type="text" required />
                                         <InputError message={errors.nama} className="mt-2" />
+                                    </div>
+                                    <div className="mb-3">
+                                        <Label>Username</Label>
+                                        <Input value={data.username} onChange={(e) => setData('username', e.target.value)} type="text" placeholder="Otomatis dari nama jika dikosongkan" />
+                                        <InputError message={errors.username} className="mt-2" />
                                     </div>
                                     <div className="mb-3">
                                         <Label>Email</Label>

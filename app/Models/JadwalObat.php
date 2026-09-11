@@ -36,6 +36,11 @@ class JadwalObat extends Model
     {
         return $this->belongsTo(ObatPasien::class, 'obat_pasien_id');
     }
+
+    public function pasien()
+    {
+        return $this->belongsTo(Pasien::class, 'pasien_id');
+    }
     /**
      * Get all of the logs for the JadwalObat
      *
