@@ -124,6 +124,7 @@ Route::controller(LiveChatController::class)->middleware('auth')->prefix('live-c
 Route::controller(ReportController::class)->middleware(['auth'])->prefix('report')->name('report.')->group(function () {
     Route::get('/', 'index')->name('index');
     Route::get('/data-pasien', 'data_pasien')->name('data-pasien');
+    Route::get('/data-hasil-kepatuhan-pasien', 'data_hasil_kepatuhan_pasien')->name('data-hasil-kepatuhan-pasien');
 });
 Route::controller(TypeTbController::class)->middleware(['auth', 'can:Superadmin'])->prefix('typetb')->name('typetb.')->group(function () {
     Route::get('/', 'index')->name('index');
