@@ -69,4 +69,25 @@ class Pasien extends Model
         }
         return ['percent' => $percent, 'minum' => $minum, 'tdk_minum' => $tdk_minum];
     }
+
+    /**
+     * Limit patients to those the actor may manage (same rules as PasienPolicy).
+     */
+    public function scopeVisibleTo($query, User $user)
+    {
+        if ($user->canManageAllPatients()) {
+            return $query;
+        }
+
+        if ($user->can('Admin')) {
+            $puskesmasId = $user->puskesmas?->id;
+            if (! $puskesmasId) {
+                return $query->whereRaw('0 = 1');
+            }
+
+            return $query->where('puskesmas_id', $puskesmasId);
+        }
+
+        return $query->whereRaw('0 = 1');
+    }
 }

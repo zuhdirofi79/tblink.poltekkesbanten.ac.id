@@ -2,82 +2,129 @@
 
 namespace App\Exports;
 
-use App\Models\HistoryJadwalObatPasien;
 use App\Models\Pasien;
 use App\Models\User;
 use Carbon\Carbon;
-use Illuminate\Contracts\View\View;
-use Maatwebsite\Excel\Concerns\FromCollection;
-use Maatwebsite\Excel\Concerns\FromView;
+use Maatwebsite\Excel\Concerns\FromQuery;
 use Maatwebsite\Excel\Concerns\ShouldAutoSize;
 use Maatwebsite\Excel\Concerns\WithColumnFormatting;
-use Maatwebsite\Excel\Concerns\WithColumnWidths;
+use Maatwebsite\Excel\Concerns\WithCustomValueBinder;
+use Maatwebsite\Excel\Concerns\WithHeadings;
+use Maatwebsite\Excel\Concerns\WithMapping;
 use Maatwebsite\Excel\Concerns\WithStyles;
+use Maatwebsite\Excel\Concerns\WithTitle;
+use PhpOffice\PhpSpreadsheet\Cell\Cell;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
+use PhpOffice\PhpSpreadsheet\Cell\DefaultValueBinder;
+use PhpOffice\PhpSpreadsheet\Style\NumberFormat;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
-class DataPasienExport implements FromView, ShouldAutoSize, WithStyles, WithColumnWidths
+class DataPasienExport extends DefaultValueBinder implements FromQuery, WithHeadings, WithMapping, WithColumnFormatting, WithCustomValueBinder, ShouldAutoSize, WithStyles, WithTitle
 {
-    public $user;
-    public function __construct(User $user)
+    private int $rowNumber = 0;
+
+    public function __construct(private User $user)
     {
-        $this->user = $user;
     }
+
+    public function title(): string
+    {
+        return 'Data Pasien';
+    }
+
+    public function query()
+    {
+        return Pasien::query()
+            ->visibleTo($this->user)
+            ->with(['user', 'puskesmas', 'pendamping'])
+            ->orderBy('nama');
+    }
+
+    public function headings(): array
+    {
+        return [
+            'No',
+            'Nama Pasien',
+            'NIK',
+            'Email',
+            'No HP',
+            'Jenis Kelamin',
+            'Tanggal Lahir',
+            'Tanggal Diagnosis',
+            'Type TB',
+            'Mulai Pengobatan',
+            'Jenjang Terapi',
+            'Selesai Pengobatan',
+            'Alamat',
+            'Puskesmas',
+            'Pendamping',
+            'Status',
+        ];
+    }
+
     /**
-     * @return \Illuminate\Support\Collection
+     * @param  Pasien  $pasien
      */
-    public function view(): View
+    public function map($pasien): array
     {
-        $col = collect();
-        $psnq = Pasien::orderBy('nama');
-        if ($this->user->can('Admin')) {
-            $psnq->where('puskesmas_id', $this->user->puskesmas->id);
-        }
-        $psns = $psnq->get();
-        foreach ($psns as $key =>  $psn) {
-            $persen = 100;
-            $lama_mdtb = round(abs(Carbon::parse($psn->tgl_diagnosa)->diffInMonths(now()))) . ' Bulan';
-            $diminum = HistoryJadwalObatPasien::clinical()->where('pasien_id', $psn->id)->where('sudah_minum', 1)->count();
-            $persen = $diminum / (HistoryJadwalObatPasien::clinical()->where('pasien_id', $psn->id)->count()) * 100;
-            $obats = [];
-            foreach ($psn->obats as $obat) {
-                $obats[] = $obat->obat->nama_obat;
-            }
-            $col->push([
-                'no' => $key + 1,
-                'nama' => $psn->nama,
-                'umur' => round(abs(Carbon::parse($psn->tgl_lahir)->diffInYears(now()))) . ' Tahun',
-                'jenis_kelamin' => $psn->jenis_kelamin,
-                'no_telp' => $psn->user->username,
-                'nama_pmo' => $psn->pendamping ? $psn->pendamping->name : '-',
-                'no_telp_pmo' => $psn->pendamping ? $psn->pendamping->username : '-',
-                'hub_dg_pasien' => $psn->hub_dg_pasien,
-                'lama_mdtb' => $lama_mdtb,
-                'lama_minum_obat' => $lama_mdtb,
-                'nama_obat' => join(', ', $obats),
-                'puskesmas' => $psn->puskesmas->nama_puskesmas,
-                'persentase_kepatuhan' => round($persen, 2),
-            ]);
-        }
-        return view('reports.pasien', compact('col'));
-    }
-    public function styles(Worksheet $sheet)
-    {
+        $this->rowNumber++;
+
         return [
-            'A:M' => [
-                'alignment' => [
-                    'horizontal' => \PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_LEFT,
-                    'vertical' => \PhpOffice\PhpSpreadsheet\Style\Alignment::VERTICAL_TOP,
-                ]
-            ],
-            'L'   => ['alignment' => [
-                'wrapText' => true
-            ]],
+            $this->rowNumber,
+            (string) $pasien->nama,
+            (string) $pasien->nik,
+            (string) ($pasien->user?->email ?? ''),
+            (string) ($pasien->user?->no_hp ?? ''),
+            (string) $pasien->jenis_kelamin,
+            $this->formatDate($pasien->tgl_lahir),
+            $this->formatDate($pasien->tgl_diagnosa),
+            (string) ($pasien->tipe_tb ?? ''),
+            $this->formatDate($pasien->mulai_pengobatan),
+            $pasien->jenjang_terapi,
+            $this->formatDate($pasien->selesai_pengobatan),
+            (string) ($pasien->alamat ?? ''),
+            (string) ($pasien->puskesmas?->nama_puskesmas ?? ''),
+            (string) ($pasien->pendamping?->name ?? ''),
+            (string) ($pasien->status ?? ''),
         ];
     }
-    public function columnWidths(): array
+
+    public function columnFormats(): array
     {
         return [
-            'K' => 70
+            'C' => NumberFormat::FORMAT_TEXT,
+            'E' => NumberFormat::FORMAT_TEXT,
         ];
+    }
+
+    public function bindValue(Cell $cell, $value)
+    {
+        if (in_array($cell->getColumn(), ['C', 'E'], true)) {
+            $cell->setValueExplicit((string) $value, DataType::TYPE_STRING);
+
+            return true;
+        }
+
+        return parent::bindValue($cell, $value);
+    }
+
+    public function styles(Worksheet $sheet): array
+    {
+        return [
+            1 => ['font' => ['bold' => true]],
+        ];
+    }
+
+    private function formatDate(mixed $value): string
+    {
+        if (! $value) {
+            return '';
+        }
+
+        try {
+            return Carbon::parse($value)->timezone((string) config('app.timezone', 'Asia/Jakarta'))->format('d/m/Y');
+        } catch (\Throwable) {
+            return '';
+        }
     }
 }
