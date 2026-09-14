@@ -55,7 +55,8 @@ Route::prefix('pasien')->name('pasien.')->group(function () {
         Route::post('/obat/{pasien}/generate', 'obatGenerate')->name('obat.generate');
         Route::post('/obat/{pasien}/manual-reminder', 'storeManualReminder')->name('obat.manual-reminder');
         Route::delete('/obat/{pasien}/manual-reminder/{history}', 'cancelManualReminder')->name('obat.manual-reminder.cancel');
-        Route::delete('/obat/hist/{jo}', 'deleteHistJadwalObat')->name('obat.hist.delete');
+        Route::delete('/obat/{pasien}/hist/{history}', 'deleteHistJadwalObat')->name('obat.hist.delete');
+        Route::delete('/obat/hist/{history}', 'deleteHistJadwalObatCompat')->name('obat.hist.delete.compat');
         Route::get('/obat/{pasien}/create', 'obatCreate')->name('obat.create');
         Route::post('/obat/{pasien}/store', 'obatStore')->name('obat.store');
         Route::get('/obat/{pasien}/edit/{obatPasien}', 'obatEdit')->name('obat.edit');

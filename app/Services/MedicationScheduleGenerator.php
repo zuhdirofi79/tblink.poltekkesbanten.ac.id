@@ -161,7 +161,7 @@ class MedicationScheduleGenerator
             $validTimes[] = $scheduledAt->format('Y-m-d H:i:s');
 
             $existing = HistoryJadwalObatPasien::query()
-                ->clinical()
+                ->blocksGeneration()
                 ->where('pasien_id', $jadwal->pasien_id)
                 ->where('obat_id', $jadwal->obat_id)
                 ->where('waktu', $scheduledAt->format('Y-m-d H:i:s'))

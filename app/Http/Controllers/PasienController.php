@@ -18,7 +18,9 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class PasienController extends Controller
 {
@@ -279,7 +281,13 @@ class PasienController extends Controller
         $this->authorize('view', $pasien);
         $obatPasien = $pasien->obats()->with(['obat', 'jadwal.details'])->get();
         $today = now()->timezone((string) config('app.timezone'))->toDateString();
-        $obatHariIni = HistoryJadwalObatPasien::where('pasien_id', $pasien->id)->with('obat')->whereDate('waktu', $today)->orderBy('waktu')->get();
+        $obatHariIni = HistoryJadwalObatPasien::query()
+            ->visibleOnBoard()
+            ->where('pasien_id', $pasien->id)
+            ->with('obat')
+            ->whereDate('waktu', $today)
+            ->orderBy('waktu')
+            ->get();
         return inertia('pasien/obat/index', compact('pasien', 'obatPasien', 'obatHariIni'));
     }
     public function obatGenerate(Pasien $pasien)
@@ -323,12 +331,98 @@ class PasienController extends Controller
 
         return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal uji notifikasi dibatalkan.');
     }
-    public function deleteHistJadwalObat(HistoryJadwalObatPasien $historyJadwalObatPasien)
+    public function deleteHistJadwalObat(Pasien $pasien, $history)
     {
-        $pasien = $historyJadwalObatPasien->pasien;
-        abort_unless($pasien, 404);
-        $this->authorize('update', $pasien);
-        $historyJadwalObatPasien->delete();
+        return $this->destroyMedicationHistoryInstance($pasien, (int) $history);
+    }
+
+    public function deleteHistJadwalObatCompat($history)
+    {
+        $row = HistoryJadwalObatPasien::query()->find((int) $history);
+        if (! $row || ! $row->pasien) {
+            Log::warning('[MEDICATION_DELETE_NOT_FOUND]', [
+                'patient_id' => null,
+                'history_id' => (int) $history,
+                'user_id' => auth()->id(),
+            ]);
+            abort(404);
+        }
+
+        return $this->destroyMedicationHistoryInstance($row->pasien, (int) $history);
+    }
+
+    private function destroyMedicationHistoryInstance(Pasien $pasien, int $historyId)
+    {
+        $userId = auth()->id();
+
+        Log::info('[MEDICATION_DELETE_START]', [
+            'patient_id' => $pasien->id,
+            'history_id' => $historyId,
+            'user_id' => $userId,
+        ]);
+
+        $history = HistoryJadwalObatPasien::query()->find($historyId);
+        if (! $history) {
+            Log::warning('[MEDICATION_DELETE_NOT_FOUND]', [
+                'patient_id' => $pasien->id,
+                'history_id' => $historyId,
+                'user_id' => $userId,
+            ]);
+            abort(404);
+        }
+
+        if ((int) $history->pasien_id !== (int) $pasien->id) {
+            Log::warning('[MEDICATION_DELETE_FORBIDDEN]', [
+                'patient_id' => $pasien->id,
+                'history_id' => $historyId,
+                'user_id' => $userId,
+            ]);
+            abort(403);
+        }
+
+        if (auth()->user()?->cannot('update', $pasien)) {
+            Log::warning('[MEDICATION_DELETE_FORBIDDEN]', [
+                'patient_id' => $pasien->id,
+                'history_id' => $historyId,
+                'user_id' => $userId,
+            ]);
+            abort(403);
+        }
+
+        try {
+            $wasManualTest = $history->isManualTest();
+            $tombstone = [
+                'pasien_id' => $history->pasien_id,
+                'obat_id' => $history->obat_id,
+                'detail_jadwal_obat_id' => $history->detail_jadwal_obat_id,
+                'waktu' => $history->waktu,
+                'dosis' => $history->dosis,
+                'satuan' => $history->satuan,
+                'sudah_minum' => false,
+                'source' => HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED,
+            ];
+
+            $history->delete();
+
+            if (! $wasManualTest) {
+                HistoryJadwalObatPasien::create($tombstone);
+            }
+        } catch (Throwable $e) {
+            Log::error('[MEDICATION_DELETE_EXCEPTION]', [
+                'patient_id' => $pasien->id,
+                'history_id' => $historyId,
+                'user_id' => $userId,
+                'exception' => $e->getMessage(),
+            ]);
+            throw $e;
+        }
+
+        Log::info('[MEDICATION_DELETE_SUCCESS]', [
+            'patient_id' => $pasien->id,
+            'history_id' => $historyId,
+            'user_id' => $userId,
+        ]);
+
         return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal minum obat berhasil dihapus!');
     }
     public function obatCreate(Pasien $pasien)

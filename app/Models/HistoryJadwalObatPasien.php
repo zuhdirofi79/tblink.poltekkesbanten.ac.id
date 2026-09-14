@@ -10,6 +10,8 @@ class HistoryJadwalObatPasien extends Model
 
     public const SOURCE_MANUAL_TEST = 'manual_notification_test';
 
+    public const SOURCE_MANUALLY_DELETED = 'manually_deleted';
+
     protected $fillable = [
         'pasien_id',
         'obat_id',
@@ -45,6 +47,25 @@ class HistoryJadwalObatPasien extends Model
             $q->whereNull('source')
                 ->orWhere('source', '')
                 ->orWhere('source', self::SOURCE_SCHEDULE);
+        });
+    }
+
+    public function scopeVisibleOnBoard($query)
+    {
+        return $query->where(function ($q) {
+            $q->whereNull('source')
+                ->orWhere('source', '!=', self::SOURCE_MANUALLY_DELETED);
+        });
+    }
+
+    public function scopeBlocksGeneration($query)
+    {
+        return $query->where(function ($q) {
+            $q->where(function ($clinical) {
+                $clinical->whereNull('source')
+                    ->orWhere('source', '')
+                    ->orWhere('source', self::SOURCE_SCHEDULE);
+            })->orWhere('source', self::SOURCE_MANUALLY_DELETED);
         });
     }
 

@@ -215,6 +215,60 @@ test('generator does not prune upcoming manual notification tests', function () 
         ->and(HistoryJadwalObatPasien::clinical()->count())->toBe(1);
 });
 
+test('generator does not recreate a manually deleted today history', function () {
+    $this->travelTo(now()->timezone(config('app.timezone'))->setTime(10, 0, 0));
+    $fixture = medicationFixture(['waktu' => '17:00:00']);
+    $generator = app(MedicationScheduleGenerator::class);
+    $generator->generateForDate();
+
+    $row = HistoryJadwalObatPasien::clinical()->first();
+    expect($row)->not->toBeNull();
+
+    $waktu = $row->waktu;
+    $row->delete();
+    HistoryJadwalObatPasien::create([
+        'pasien_id' => $fixture['pasien']->id,
+        'obat_id' => $fixture['obat']->id,
+        'detail_jadwal_obat_id' => $fixture['jadwal']->details()->first()->id,
+        'waktu' => $waktu,
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+        'source' => HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED,
+    ]);
+
+    $second = $generator->generateForDate();
+
+    expect($second['history_created'])->toBe(0)
+        ->and(HistoryJadwalObatPasien::clinical()->count())->toBe(0)
+        ->and(HistoryJadwalObatPasien::query()->where('source', HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED)->count())->toBe(1);
+});
+
+test('generator still creates the next day after a manual delete', function () {
+    $this->travelTo(now()->timezone(config('app.timezone'))->setTime(10, 0, 0));
+    $fixture = medicationFixture(['waktu' => '17:00:00']);
+    $generator = app(MedicationScheduleGenerator::class);
+    $generator->generateForDate();
+
+    $row = HistoryJadwalObatPasien::clinical()->first();
+    $waktu = $row->waktu;
+    $row->delete();
+    HistoryJadwalObatPasien::create([
+        'pasien_id' => $fixture['pasien']->id,
+        'obat_id' => $fixture['obat']->id,
+        'detail_jadwal_obat_id' => $fixture['jadwal']->details()->first()->id,
+        'waktu' => $waktu,
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+        'source' => HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED,
+    ]);
+
+    $this->travelTo(now()->timezone(config('app.timezone'))->addDay()->setTime(10, 0, 0));
+    $stats = $generator->generateForDate();
+
+    expect($stats['history_created'])->toBe(1)
+        ->and(HistoryJadwalObatPasien::clinical()->count())->toBe(1);
+});
+
 test('history hasBeenNotified is tracked per user', function () {
     $history = new HistoryJadwalObatPasien([
         'notifikasi_dikirim' => [

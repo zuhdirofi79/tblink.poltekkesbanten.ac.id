@@ -34,6 +34,7 @@ function defaultTestTime() {
 export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
     const [delData, setDelData] = useState()
     const [delDialog, setDelDialog] = useState(false)
+    const [delError, setDelError] = useState('')
     const [testOpen, setTestOpen] = useState(false)
 
     const selectableObat = useMemo(
@@ -42,7 +43,11 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
     )
 
     const closeDelDialog = () => {
+        if (fDel.processing) {
+            return
+        }
         setDelDialog(false)
+        setDelError('')
         setTimeout(() => setDelData(false), 300)
     }
     const bc = [
@@ -59,8 +64,23 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
         fGen.post(route('pasien.obat.generate', pasien.id))
     }
     const fDel = useForm()
-    const delJadwal = (jo) => {
-        fDel.delete(route('pasien.obat.hist.delete', jo.id))
+    const delJadwal = (row) => {
+        if (fDel.processing || !row?.id) {
+            return
+        }
+        setDelError('')
+        fDel.delete(route('pasien.obat.hist.delete', { pasien: pasien.id, history: row.id }), {
+            preserveScroll: true,
+            onSuccess: () => {
+                setDelDialog(false)
+                setDelError('')
+                setTimeout(() => setDelData(false), 300)
+            },
+            onError: (errors) => {
+                const first = errors && typeof errors === 'object' ? Object.values(errors)[0] : null
+                setDelError(typeof first === 'string' && first ? first : 'Gagal menghapus jadwal minum obat.')
+            },
+        })
     }
     const fCancel = useForm()
     const cancelTest = (ops) => {
@@ -140,25 +160,30 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
                                             obatHariIni.map(ops => (
                                                 <TableRow key={ops.id}>
                                                     <TableCell className={'flex items-center justify-center gap-2'}>
-                                                        {
-                                                            canCancelTest(ops) ?
-                                                                <Button
-                                                                    size={'sm'}
-                                                                    variant={'outline'}
-                                                                    disabled={fCancel.processing}
-                                                                    onClick={() => cancelTest(ops)}
-                                                                >
-                                                                    Batalkan Uji
-                                                                </Button>
-                                                                : (!ops.sudah_minum && !isTestRow(ops) ?
-                                                                    <Button size={'sm'} variant={'icon'} onClick={() => {
-                                                                        setDelData(ops)
-                                                                        setTimeout(() => setDelDialog(true), 100)
-                                                                    }}>
-                                                                        <Trash className='text-destructive' />
-                                                                    </Button>
-                                                                    : '')
-                                                        }
+                                                        {canCancelTest(ops) ? (
+                                                            <Button
+                                                                size={'sm'}
+                                                                variant={'outline'}
+                                                                disabled={fCancel.processing}
+                                                                onClick={() => cancelTest(ops)}
+                                                            >
+                                                                Batalkan Uji
+                                                            </Button>
+                                                        ) : null}
+                                                        {!ops.sudah_minum ? (
+                                                            <Button
+                                                                size={'sm'}
+                                                                variant={'icon'}
+                                                                disabled={fDel.processing}
+                                                                onClick={() => {
+                                                                    setDelError('')
+                                                                    setDelData(ops)
+                                                                    setTimeout(() => setDelDialog(true), 100)
+                                                                }}
+                                                            >
+                                                                <Trash className='text-destructive' />
+                                                            </Button>
+                                                        ) : null}
                                                     </TableCell>
                                                     <TableCell>{ops.obat.nama_obat}</TableCell>
                                                     <TableCell>{moment(ops.waktu).format('HH:mm')}</TableCell>
@@ -215,12 +240,17 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
                             <DialogHeader>
                                 <DialogTitle>Apakah anda yakin ingin menghapus jadwal minum obat ini ?</DialogTitle>
                                 <DialogDescription>
-                                    {delData.obat.nama_obat} {moment(delData.waktu).format('HH:mm')}
+                                    {delData.obat?.nama_obat} {moment(delData.waktu).format('HH:mm')}
                                 </DialogDescription>
                             </DialogHeader>
+                            {delError ? (
+                                <p className='text-sm text-destructive'>{delError}</p>
+                            ) : null}
                             <div className="flex gap-2 justify-end">
-                                <Button onClick={closeDelDialog}>Batal</Button>
-                                <Button onClick={() => delJadwal(delData)} variant={'destructive'}>Hapus</Button>
+                                <Button onClick={closeDelDialog} disabled={fDel.processing}>Batal</Button>
+                                <Button onClick={() => delJadwal(delData)} variant={'destructive'} disabled={fDel.processing}>
+                                    {fDel.processing ? 'Menghapus...' : 'Hapus'}
+                                </Button>
                             </div>
                         </DialogContent>
                     </Dialog>
