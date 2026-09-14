@@ -16,6 +16,10 @@ class ObatPasien extends Model
         'active',
     ];
 
+    protected $casts = [
+        'active' => 'boolean',
+    ];
+
     protected $appends = ['stock'];
 
     public function getStockAttribute()

@@ -156,8 +156,13 @@ export default function PIndexObat({ pasien, obatPasien, obatHariIni }) {
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
-                                        {
-                                            obatHariIni.map(ops => (
+                                        {!(obatHariIni || []).length ? (
+                                            <TableRow>
+                                                <TableCell colSpan={4} className='text-muted-foreground'>
+                                                    Tidak ada jadwal obat aktif untuk hari ini.
+                                                </TableCell>
+                                            </TableRow>
+                                        ) : obatHariIni.map(ops => (
                                                 <TableRow key={ops.id}>
                                                     <TableCell className={'flex items-center justify-center gap-2'}>
                                                         {canCancelTest(ops) ? (

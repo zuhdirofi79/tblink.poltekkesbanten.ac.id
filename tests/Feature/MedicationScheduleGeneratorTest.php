@@ -269,6 +269,63 @@ test('generator still creates the next day after a manual delete', function () {
         ->and(HistoryJadwalObatPasien::clinical()->count())->toBe(1);
 });
 
+test('generator creates one history row per configured time', function () {
+    $fixture = medicationFixture(['with_detail' => false]);
+    $fixture['jadwal']->details()->create(['waktu' => '07:00:00', 'dosis' => 1, 'satuan' => 'Tablet']);
+    $fixture['jadwal']->details()->create(['waktu' => '14:00:00', 'dosis' => 1, 'satuan' => 'Tablet']);
+    $fixture['jadwal']->details()->create(['waktu' => '20:00:00', 'dosis' => 1, 'satuan' => 'Tablet']);
+
+    $stats = app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $fixture['pasien']->id);
+
+    expect($stats['history_created'])->toBe(3)
+        ->and(HistoryJadwalObatPasien::clinical()->count())->toBe(3);
+
+    $times = HistoryJadwalObatPasien::query()
+        ->get()
+        ->map(fn ($row) => $row->waktu->timezone(config('app.timezone'))->format('H:i'))
+        ->sort()
+        ->values()
+        ->all();
+
+    expect($times)->toBe(['07:00', '14:00', '20:00']);
+});
+
+test('two active assignments of the same medicine at different times both survive generate', function () {
+    $this->travelTo(now()->timezone(config('app.timezone'))->setTime(10, 0, 0));
+    $fixture = medicationFixture(['waktu' => '07:00:00']);
+    $secondOp = ObatPasien::create([
+        'pasien_id' => $fixture['pasien']->id,
+        'obat_id' => $fixture['obat']->id,
+        'active' => true,
+    ]);
+    $secondJadwal = JadwalObat::create([
+        'obat_pasien_id' => $secondOp->id,
+        'obat_id' => $fixture['obat']->id,
+        'pasien_id' => $fixture['pasien']->id,
+        'mulai_tanggal' => now()->toDateString(),
+        'selesai_tanggal' => now()->addDays(28)->toDateString(),
+        'qty_diberikan' => 14,
+        'satuan' => 'Tablet',
+    ]);
+    $secondJadwal->details()->create([
+        'waktu' => '14:00:00',
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+    ]);
+
+    $stats = app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $fixture['pasien']->id);
+
+    $times = HistoryJadwalObatPasien::clinical()
+        ->get()
+        ->map(fn ($row) => $row->waktu->timezone(config('app.timezone'))->format('H:i'))
+        ->sort()
+        ->values()
+        ->all();
+
+    expect($stats['history_created'])->toBe(2)
+        ->and($times)->toBe(['07:00', '14:00']);
+});
+
 test('history hasBeenNotified is tracked per user', function () {
     $history = new HistoryJadwalObatPasien([
         'notifikasi_dikirim' => [

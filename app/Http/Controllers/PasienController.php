@@ -293,8 +293,33 @@ class PasienController extends Controller
     public function obatGenerate(Pasien $pasien)
     {
         $this->authorize('view', $pasien);
-        app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
-        return redirect(route('pasien.obat.index', $pasien))->with('success', 'Jadwal obat berhasil di generate!');
+        $stats = app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
+
+        $created = (int) $stats['history_created'];
+        $existing = (int) $stats['history_existing'];
+        $skipped = (int) $stats['skipped'];
+        $errors = (int) $stats['errors'];
+        $suppressed = (int) ($stats['history_suppressed'] ?? 0);
+
+        $summary = $created.' jadwal dibuat, '.$existing.' sudah ada, '.$skipped.' dilewati, '.$errors.' error.';
+
+        if ($created > 0) {
+            return redirect(route('pasien.obat.index', $pasien))
+                ->with('success', 'Jadwal obat berhasil digenerate. '.$summary);
+        }
+
+        if ($existing > 0) {
+            return redirect(route('pasien.obat.index', $pasien))
+                ->with('success', 'Tidak ada jadwal baru. '.$summary);
+        }
+
+        if ($suppressed > 0) {
+            return redirect(route('pasien.obat.index', $pasien))
+                ->with('error', 'Tidak ada jadwal obat aktif untuk hari ini. Jadwal yang dihapus secara manual tidak dibuat ulang.');
+        }
+
+        return redirect(route('pasien.obat.index', $pasien))
+            ->with('error', 'Tidak ada jadwal obat aktif untuk hari ini.');
     }
 
     public function storeManualReminder(Request $r, Pasien $pasien, ManualMedicationReminderService $manualReminder)
