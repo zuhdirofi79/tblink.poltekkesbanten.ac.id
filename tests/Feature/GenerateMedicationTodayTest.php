@@ -182,7 +182,7 @@ test('inactive medication generates zero histories', function () {
 
     $this->actingAs($world['admin'])
         ->post(route('pasien.obat.generate', $world['pasien']))
-        ->assertSessionHas('error', 'Tidak ada jadwal obat aktif untuk hari ini.');
+        ->assertSessionHas('error');
 
     expect(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(0);
 });
@@ -284,7 +284,7 @@ test('manual test schedule remains intact after generate', function () {
         ->and(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(1);
 });
 
-test('two identical medicines at the same time collapse to one history row', function () {
+test('two active assignments of the same medicine both generate their own history', function () {
     $world = generateTodayWorld(['times' => ['07:00:00']]);
     $secondOp = ObatPasien::create([
         'pasien_id' => $world['pasien']->id,
@@ -308,7 +308,7 @@ test('two identical medicines at the same time collapse to one history row', fun
 
     $this->actingAs($world['admin'])->post(route('pasien.obat.generate', $world['pasien']));
 
-    expect(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(1);
+    expect(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(2);
 });
 
 test('generated history contains the selected patient id', function () {
@@ -372,4 +372,122 @@ test('generate page lists created rows for the selected patient', function () {
             ->where('obatHariIni.0.pasien_id', $world['pasien']->id)
             ->where('obatHariIni.1.pasien_id', $world['pasien']->id)
         );
+});
+
+test('multiple active medications all appear after generate', function () {
+    $world = generateTodayWorld(['times' => ['07:00:00']]);
+    $secondOp = ObatPasien::create([
+        'pasien_id' => $world['pasien']->id,
+        'obat_id' => $world['obatB']->id,
+        'active' => true,
+    ]);
+    $secondJadwal = JadwalObat::create([
+        'obat_pasien_id' => $secondOp->id,
+        'obat_id' => $world['obatB']->id,
+        'pasien_id' => $world['pasien']->id,
+        'mulai_tanggal' => now()->toDateString(),
+        'selesai_tanggal' => now()->addDays(28)->toDateString(),
+        'qty_diberikan' => 10,
+        'satuan' => 'Tablet',
+    ]);
+    $secondJadwal->details()->create(['waktu' => '22:08:00', 'dosis' => 1, 'satuan' => 'Tablet']);
+
+    $this->actingAs($world['admin'])->post(route('pasien.obat.generate', $world['pasien']));
+
+    $obatIds = HistoryJadwalObatPasien::clinical()
+        ->where('pasien_id', $world['pasien']->id)
+        ->pluck('obat_id')
+        ->sort()
+        ->values()
+        ->all();
+
+    expect($obatIds)->toBe(collect([$world['obat']->id, $world['obatB']->id])->sort()->values()->all());
+
+    $this->actingAs($world['admin'])
+        ->get(route('pasien.obat.index', $world['pasien']))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page->has('obatHariIni', 2));
+});
+
+test('explicit generate restores a manually deleted today history', function () {
+    $world = generateTodayWorld(['times' => ['07:00:00']]);
+    $this->actingAs($world['admin'])->post(route('pasien.obat.generate', $world['pasien']));
+    $row = HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->first();
+    $waktu = $row->waktu;
+    $detailId = $row->detail_jadwal_obat_id;
+    $row->delete();
+    HistoryJadwalObatPasien::create([
+        'pasien_id' => $world['pasien']->id,
+        'obat_id' => $world['obat']->id,
+        'detail_jadwal_obat_id' => $detailId,
+        'waktu' => $waktu,
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+        'source' => HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED,
+    ]);
+
+    $this->actingAs($world['admin'])
+        ->post(route('pasien.obat.generate', $world['pasien']))
+        ->assertSessionHas('success');
+
+    expect(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(1)
+        ->and(HistoryJadwalObatPasien::query()->where('source', HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED)->count())->toBe(0);
+});
+
+test('automatic generate does not restore a manually deleted history', function () {
+    $world = generateTodayWorld(['times' => ['07:00:00']]);
+    app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $world['pasien']->id);
+    $row = HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->first();
+    $waktu = $row->waktu;
+    $detailId = $row->detail_jadwal_obat_id;
+    $row->delete();
+    HistoryJadwalObatPasien::create([
+        'pasien_id' => $world['pasien']->id,
+        'obat_id' => $world['obat']->id,
+        'detail_jadwal_obat_id' => $detailId,
+        'waktu' => $waktu,
+        'dosis' => 1,
+        'satuan' => 'Tablet',
+        'source' => HistoryJadwalObatPasien::SOURCE_MANUALLY_DELETED,
+    ]);
+
+    $stats = app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $world['pasien']->id);
+
+    expect($stats['history_created'])->toBe(0)
+        ->and($stats['skip_reasons']['manually_deleted'] ?? 0)->toBe(1)
+        ->and(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(0);
+});
+
+test('one invalid medication does not stop valid medications', function () {
+    $world = generateTodayWorld(['times' => ['07:00:00']]);
+    $broken = ObatPasien::create([
+        'pasien_id' => $world['pasien']->id,
+        'obat_id' => $world['obatB']->id,
+        'active' => true,
+    ]);
+    JadwalObat::create([
+        'obat_pasien_id' => $broken->id,
+        'obat_id' => $world['obatB']->id,
+        'pasien_id' => $world['pasien']->id,
+        'mulai_tanggal' => now()->toDateString(),
+        'selesai_tanggal' => now()->addDays(28)->toDateString(),
+        'qty_diberikan' => 5,
+        'satuan' => 'Tablet',
+    ]);
+
+    $this->actingAs($world['admin'])->post(route('pasien.obat.generate', $world['pasien']));
+
+    expect(HistoryJadwalObatPasien::clinical()->where('pasien_id', $world['pasien']->id)->count())->toBe(1)
+        ->and(HistoryJadwalObatPasien::clinical()->where('obat_id', $world['obat']->id)->count())->toBe(1)
+        ->and(HistoryJadwalObatPasien::clinical()->where('obat_id', $world['obatB']->id)->count())->toBe(0);
+});
+
+test('empty schedule details produce an explicit skip reason', function () {
+    $world = generateTodayWorld(['times' => ['07:00:00']]);
+    $world['jadwal']->details()->delete();
+
+    $stats = app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $world['pasien']->id);
+
+    expect($stats['history_created'])->toBe(0)
+        ->and($stats['skip_reasons']['no_details'] ?? 0)->toBe(1);
 });

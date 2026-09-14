@@ -293,15 +293,22 @@ class PasienController extends Controller
     public function obatGenerate(Pasien $pasien)
     {
         $this->authorize('view', $pasien);
-        $stats = app(MedicationScheduleGenerator::class)->generateForDate(pasienId: $pasien->id);
+        $stats = app(MedicationScheduleGenerator::class)->generateForDate(
+            pasienId: $pasien->id,
+            restoreManualDeletions: true,
+        );
 
         $created = (int) $stats['history_created'];
         $existing = (int) $stats['history_existing'];
         $skipped = (int) $stats['skipped'];
         $errors = (int) $stats['errors'];
-        $suppressed = (int) ($stats['history_suppressed'] ?? 0);
+        $skipReasons = $stats['skip_reasons'] ?? [];
 
         $summary = $created.' jadwal dibuat, '.$existing.' sudah ada, '.$skipped.' dilewati, '.$errors.' error.';
+        $skipNote = $this->formatGenerateSkipNote($skipReasons);
+        if ($skipNote !== '') {
+            $summary .= ' '.$skipNote;
+        }
 
         if ($created > 0) {
             return redirect(route('pasien.obat.index', $pasien))
@@ -313,13 +320,37 @@ class PasienController extends Controller
                 ->with('success', 'Tidak ada jadwal baru. '.$summary);
         }
 
-        if ($suppressed > 0) {
-            return redirect(route('pasien.obat.index', $pasien))
-                ->with('error', 'Tidak ada jadwal obat aktif untuk hari ini. Jadwal yang dihapus secara manual tidak dibuat ulang.');
+        return redirect(route('pasien.obat.index', $pasien))
+            ->with('error', 'Tidak ada jadwal obat aktif untuk hari ini.'.($skipNote !== '' ? ' '.$skipNote : ''));
+    }
+
+    /**
+     * @param  array<string, int>  $skipReasons
+     */
+    private function formatGenerateSkipNote(array $skipReasons): string
+    {
+        if ($skipReasons === []) {
+            return '';
         }
 
-        return redirect(route('pasien.obat.index', $pasien))
-            ->with('error', 'Tidak ada jadwal obat aktif untuk hari ini.');
+        $labels = [
+            'inactive' => 'Non Aktif',
+            'no_jadwal' => 'belum memiliki jadwal pengobatan',
+            'no_details' => 'belum memiliki jadwal waktu minum',
+            'outside_period' => 'di luar periode pengobatan',
+            'invalid_time' => 'waktu tidak valid',
+            'inactive_patient' => 'pasien tidak aktif',
+            'manually_deleted' => 'dihapus manual',
+            'exception' => 'error',
+        ];
+
+        $parts = [];
+        foreach ($skipReasons as $reason => $count) {
+            $label = $labels[$reason] ?? $reason;
+            $parts[] = $count.' '.$label;
+        }
+
+        return 'Alasan dilewati: '.implode(', ', $parts).'.';
     }
 
     public function storeManualReminder(Request $r, Pasien $pasien, ManualMedicationReminderService $manualReminder)
